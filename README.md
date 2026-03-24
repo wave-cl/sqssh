@@ -65,9 +65,14 @@ sqsshd                          # listen on 0.0.0.0:22/udp
 sqsshd --port 4022              # custom port
 sqsshd --show-pubkey            # print server public key
 sqsshd --auth-mode open+user    # disable whitelist, use authorized_keys only
+sqsshd --log-level debug        # trace, debug, info, warn, error
+sqsshd --log-file /var/log/sqsshd.log
+sqsshd --log-json               # JSON-formatted output
 ```
 
 Host key: `/etc/sqssh/host_key`. Server config: `/etc/sqssh/sqsshd.conf`.
+
+Handles SIGTERM/SIGINT gracefully — drains active connections (30s timeout), cleans up the control socket, and exits cleanly.
 
 ### Manage keys at runtime
 
