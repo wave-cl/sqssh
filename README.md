@@ -40,17 +40,20 @@ sqssh-keygen                    # prompts for optional passphrase
 sqssh-keygen -f ~/.sqssh/work   # custom path
 ```
 
-Creates `~/.sqssh/id_ed25519` and `~/.sqssh/id_ed25519.pub`.
+Creates `~/.sqssh/id_ed25519` and `~/.sqssh/id_ed25519.pub`. Passphrase-protected keys are encrypted with argon2id + chacha20-poly1305.
 
 ### Connect to a server
 
 ```
 sqssh user@host
 sqssh -p 4022 user@host
+sqssh -i ~/.sqssh/work_key user@host
 sqssh user@host ls -la
 ```
 
-Escape sequences: `~.` disconnect, `~?` help, `~~` literal tilde. Auto-reconnects on connection loss.
+Escape sequences: `~.` disconnect, `~?` help, `~~` literal tilde. Auto-reconnects on connection loss without re-prompting for passphrase.
+
+**Key resolution order:** `-i` flag → config `IdentityFile` → agent → learned `~/.sqssh/key_map` → default `id_ed25519`. On successful connect, the host→key mapping is saved to `key_map` automatically.
 
 ### Copy files
 
@@ -220,7 +223,7 @@ host.example.com sqssh-ed25519 CEFuAsD7Kn5ABJUb4S2ujJxrasBkpoDJCoaNvnh7qdRu
 ## Protocol
 
 - **Transport:** sQUIC over UDP (default port 22)
-- **Crypto:** Ed25519 keys, X25519 key exchange (via sQUIC)
+- **Crypto:** Ed25519 keys, X25519 key exchange (via sQUIC), argon2id + chacha20-poly1305 for key encryption
 - **Serialization:** MessagePack with length-prefixed framing
 - **ALPN:** `sqssh/1`
 - **Stream 0:** Control channel (auth, forwarding setup, disconnect)
