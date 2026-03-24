@@ -11,6 +11,7 @@ SSH runs over TCP. sqssh runs over sQUIC, which means:
 - **Multiplexed streams** — no head-of-line blocking between channels
 - **Silent server** — the server is invisible to unauthenticated scanners (sQUIC whitelisting)
 - **Parallel file transfers** — sqscp copies multiple files simultaneously over independent streams
+- **Session persistence** — shell sessions survive server restarts via PTY fd handoff
 
 Same port number (22), different protocol (UDP instead of TCP). They coexist.
 
@@ -28,6 +29,7 @@ Same port number (22), different protocol (UDP instead of TCP). They coexist.
 | `sqssh-copy-id` | ✓ | Deploy public keys to remote hosts |
 | `sqssh-keyscan` | ✓ | Manage known hosts |
 | `sqsftp` | ✓ | Interactive file transfer |
+| `sqssh-persist` | ✓ | PTY fd holder for server restarts |
 
 ## Quick start
 
@@ -46,6 +48,8 @@ sqssh user@host
 sqssh -p 4022 user@host
 sqssh user@host ls -la
 ```
+
+Escape sequences: `~.` disconnect, `~?` help, `~~` literal tilde. Auto-reconnects on connection loss.
 
 ### Copy files
 
@@ -73,6 +77,15 @@ sqsshd --log-json               # JSON-formatted output
 Host key: `/etc/sqssh/host_key`. Server config: `/etc/sqssh/sqsshd.conf`.
 
 Handles SIGTERM/SIGINT gracefully — drains active connections (30s timeout), cleans up the control socket, and exits cleanly.
+
+### Zero-downtime restarts
+
+```
+kill -USR1 $(pgrep sqsshd)        # persist sessions
+sqsshd --port 22                  # start new instance, recovers sessions
+```
+
+SIGUSR1 triggers session persistence: PTY master file descriptors are handed off to `sqssh-persist` via SCM_RIGHTS, shell processes survive (they called `setsid`), and the new sqsshd recovers the sessions. Clients auto-reconnect in ~2 seconds and resume where they left off — running processes, tail commands, and terminal state are preserved.
 
 ### Manage keys at runtime
 
