@@ -327,24 +327,37 @@ async fn run_interactive_shell(
         Err(e) => {
             let msg = e.to_string();
 
-            // Server-initiated close (shutdown/restart) — exit cleanly like SSH
-            if msg.contains("server shutting down")
-                || msg.contains("server restarting")
+            // Server daemon restarting (SIGUSR1) — reconnect to persisted session
+            if msg.contains("server restarting") {
+                conn.close(quinn::VarInt::from_u32(0), b"reconnecting");
+                eprintln!("\r\nServer restarting. Reconnecting...");
+            }
+            // Server daemon stopped or VPS shutdown — exit cleanly
+            else if msg.contains("server shutting down")
                 || msg.contains("application close")
             {
                 eprintln!("\r\nConnection closed by remote host.");
                 conn.close(quinn::VarInt::from_u32(0), b"");
                 std::process::exit(0);
             }
-
-            // Unexpected connection loss (network drop, timeout) — auto-reconnect
-            if msg.contains("connection lost")
+            // Network drop / timeout — exit cleanly
+            else if msg.contains("connection lost")
                 || msg.contains("stream finished")
                 || msg.contains("timed out")
             {
-                conn.close(quinn::VarInt::from_u32(0), b"reconnecting");
-                eprintln!("\r\nConnection lost. Reconnecting...");
+                eprintln!("\r\nConnection lost.");
+                conn.close(quinn::VarInt::from_u32(0), b"");
+                std::process::exit(1);
+            }
+            else {
+                // Unknown error — don't reconnect
+                conn.close(quinn::VarInt::from_u32(0), b"");
+                eprintln!("\r\nsqssh: {msg}");
+                std::process::exit(1);
+            }
 
+            // Reconnect loop (only reached for "server restarting")
+            {
                 let mut attempt = 0u32;
 
                 loop {
