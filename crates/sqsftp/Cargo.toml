@@ -1,0 +1,12 @@
+[package]
+name = "sqsftp"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "sqsftp"
+path = "src/main.rs"
+
+[dependencies]
+sqssh-core = { workspace = true }
+clap = { workspace = true }

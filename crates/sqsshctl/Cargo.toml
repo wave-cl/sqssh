@@ -1,0 +1,12 @@
+[package]
+name = "sqsshctl"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "sqsshctl"
+path = "src/main.rs"
+
+[dependencies]
+sqssh-core = { workspace = true }
+clap = { workspace = true }

@@ -1,0 +1,17 @@
+[package]
+name = "sqssh-keygen"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "sqssh-keygen"
+path = "src/main.rs"
+
+[dependencies]
+sqssh-core = { workspace = true }
+clap = { workspace = true }
+ed25519-dalek = { workspace = true }
+bs58 = { workspace = true }
+zeroize = { workspace = true }
+rand = { workspace = true }
+whoami = { workspace = true }
