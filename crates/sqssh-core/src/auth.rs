@@ -180,7 +180,16 @@ impl AuthorizedKeys {
                         "loaded {} authorized key(s) for user '{username}' from {ak_path:?}",
                         keys.len()
                     );
-                    ak.add_user_keys(username, &keys);
+                    for (key, comment) in &keys {
+                        let entry = AuthorizedEntry {
+                            username: username.to_string(),
+                            comment: comment.clone(),
+                        };
+                        ak.entries
+                            .entry(*key.as_bytes())
+                            .or_default()
+                            .push(entry);
+                    }
                 }
                 Ok(_) => {}
                 Err(e) => {
@@ -194,30 +203,30 @@ impl AuthorizedKeys {
 
     /// Reload keys for a single user. Removes old keys for that user first.
     pub fn reload_user(&mut self, username: &str, uid: u32, ak_path: &Path) -> Result<()> {
-        self.remove_user(username);
+        // Remove all keys for this user
+        for entries in self.entries.values_mut() {
+            entries.retain(|e| e.username != username);
+        }
+        self.entries.retain(|_, entries| !entries.is_empty());
+
         let keys = Self::load_file(ak_path, Some(uid))?;
         if !keys.is_empty() {
             tracing::info!(
                 "reloaded {} key(s) for user '{username}'",
                 keys.len()
             );
-            self.add_user_keys(username, &keys);
+            for (key, comment) in &keys {
+                let entry = AuthorizedEntry {
+                    username: username.to_string(),
+                    comment: comment.clone(),
+                };
+                self.entries
+                    .entry(*key.as_bytes())
+                    .or_default()
+                    .push(entry);
+            }
         }
         Ok(())
-    }
-
-    /// Add all keys from a user's authorized_keys file.
-    pub fn add_user_keys(&mut self, username: &str, keys: &[(VerifyingKey, String)]) {
-        for (key, comment) in keys {
-            let entry = AuthorizedEntry {
-                username: username.to_string(),
-                comment: comment.clone(),
-            };
-            self.entries
-                .entry(*key.as_bytes())
-                .or_default()
-                .push(entry);
-        }
     }
 
     /// Check if a public key is authorized for a given username.
@@ -233,19 +242,4 @@ impl AuthorizedKeys {
         self.entries.keys().copied().collect()
     }
 
-    /// Get all usernames a pubkey is authorized for.
-    pub fn usernames_for_key(&self, pubkey: &VerifyingKey) -> Vec<&str> {
-        self.entries
-            .get(pubkey.as_bytes())
-            .map(|entries| entries.iter().map(|e| e.username.as_str()).collect())
-            .unwrap_or_default()
-    }
-
-    /// Remove all keys for a specific user (for rescanning).
-    pub fn remove_user(&mut self, username: &str) {
-        for entries in self.entries.values_mut() {
-            entries.retain(|e| e.username != username);
-        }
-        self.entries.retain(|_, entries| !entries.is_empty());
-    }
 }

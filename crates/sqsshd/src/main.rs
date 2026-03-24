@@ -32,7 +32,7 @@ enum AcceptResult {
     /// Raw shell data stream.
     RawShell(quinn::SendStream, quinn::RecvStream, protocol::RawShellHeader),
     /// Raw shell control stream.
-    ShellControl(quinn::SendStream, quinn::RecvStream),
+    ShellControl,
     /// Raw SFTP session.
     RawSftp(quinn::SendStream, quinn::RecvStream),
 }
@@ -93,7 +93,6 @@ struct ServerState {
     auth_mode: AuthMode,
     ak_relative: String,
     listener: squic::ServerListener,
-    shutdown_rx: watch::Receiver<bool>,
     allow_users: Vec<String>,
     deny_users: Vec<String>,
     print_motd: bool,
@@ -256,7 +255,6 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         auth_mode: server_config.auth_mode,
         ak_relative: server_config.authorized_keys_file.clone(),
         listener,
-        shutdown_rx: shutdown_rx.clone(),
         allow_users: server_config.allow_users.clone(),
         deny_users: server_config.deny_users.clone(),
         print_motd: server_config.print_motd,
@@ -840,7 +838,7 @@ async fn handle_connection(
                                         }
                                     }
                                     protocol::SHELL_CONTROL => {
-                                        AcceptResult::ShellControl(send, recv)
+                                        AcceptResult::ShellControl
                                     }
                                     protocol::RAW_SFTP => {
                                         AcceptResult::RawSftp(send, recv)
@@ -997,7 +995,7 @@ async fn handle_connection(
                 );
                 continue;
             }
-            AcceptResult::ShellControl(_, _) => {
+            AcceptResult::ShellControl => {
                 // Shell control without preceding raw shell — ignore
                 tracing::warn!("received ShellControl without RawShell");
                 continue;
@@ -1115,66 +1113,11 @@ async fn handle_connection(
                 // Legacy framed SFTP — no longer supported, use RAW_SFTP
                 channel.reject(1, "use raw sftp stream").await?;
             }
-            other => {
-                tracing::warn!("unsupported channel type: {other:?}");
-                channel.reject(1, "unsupported channel type").await?;
-            }
         }
     }
 
     tracing::info!("disconnected");
     Ok(())
-}
-
-async fn handle_session(
-    mut channel: Channel,
-    username: &str,
-    remote_host: &str,
-    print_motd: bool,
-    print_last_log: bool,
-    banner: Option<String>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Send banner if configured
-    if let Some(ref content) = banner {
-        channel
-            .send(&ChannelMsg::Data {
-                payload: content.replace('\n', "\r\n").into_bytes(),
-            })
-            .await?;
-    }
-
-    let mut term = String::from("xterm-256color");
-    let mut cols: u16 = 80;
-    let mut rows: u16 = 24;
-
-    loop {
-        let msg = channel.recv().await?;
-        match msg {
-            ChannelMsg::PtyRequest {
-                term: t,
-                cols: c,
-                rows: r,
-            } => {
-                term = t;
-                cols = c as u16;
-                rows = r as u16;
-                channel.send(&ChannelMsg::PtySuccess).await?;
-            }
-            ChannelMsg::ShellRequest => {
-                break;
-            }
-            ChannelMsg::ExecRequest { command } => {
-                tracing::debug!(cmd = %command, "exec request");
-                pty_handler::run_exec(&mut channel, username, &command).await?;
-                return Ok(());
-            }
-            other => {
-                tracing::debug!("ignoring pre-shell message: {other:?}");
-            }
-        }
-    }
-
-    pty_handler::run_shell(&mut channel, username, remote_host, &term, cols, rows, print_motd, print_last_log, |_| {}).await
 }
 
 async fn handle_session_with_persist(

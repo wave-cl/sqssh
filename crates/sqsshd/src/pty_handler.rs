@@ -7,7 +7,6 @@ use nix::pty::openpty;
 use nix::unistd;
 use sqssh_core::protocol::{ChannelMsg, ShellControlMsg};
 use sqssh_core::stream::Channel;
-use tokio::io::AsyncWriteExt;
 use tokio::io::unix::AsyncFd;
 
 /// Look up a system user by name. Returns (uid, gid, home, shell).

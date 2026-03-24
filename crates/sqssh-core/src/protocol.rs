@@ -17,13 +17,6 @@ pub const DEFAULT_PORT: u16 = 22;
 const MSG_AUTH_REQUEST: u8 = 0x01;
 const MSG_AUTH_SUCCESS: u8 = 0x02;
 const MSG_AUTH_FAILURE: u8 = 0x03;
-const MSG_TCPIP_FORWARD_REQUEST: u8 = 0x10;
-const MSG_TCPIP_FORWARD_SUCCESS: u8 = 0x11;
-const MSG_CANCEL_TCPIP_FORWARD: u8 = 0x12;
-const MSG_UDP_FORWARD_REQUEST: u8 = 0x13;
-const MSG_CANCEL_UDP_FORWARD: u8 = 0x14;
-const MSG_DISCONNECT: u8 = 0x20;
-
 const MSG_CHANNEL_OPEN: u8 = 0x30;
 const MSG_CHANNEL_OPEN_CONFIRM: u8 = 0x31;
 const MSG_CHANNEL_OPEN_FAILURE: u8 = 0x32;
@@ -31,17 +24,13 @@ const MSG_PTY_REQUEST: u8 = 0x40;
 const MSG_PTY_SUCCESS: u8 = 0x41;
 const MSG_SHELL_REQUEST: u8 = 0x42;
 const MSG_EXEC_REQUEST: u8 = 0x43;
-const MSG_SUBSYSTEM_REQUEST: u8 = 0x44;
 const MSG_DATA: u8 = 0x50;
 const MSG_EXTENDED_DATA: u8 = 0x51;
 const MSG_WINDOW_CHANGE: u8 = 0x60;
-const MSG_SIGNAL: u8 = 0x61;
 const MSG_EXIT_STATUS: u8 = 0x62;
-const MSG_EXIT_SIGNAL: u8 = 0x63;
 const MSG_FILE_HEADER: u8 = 0x80;
 const MSG_FILE_RESULT: u8 = 0x81;
 const MSG_FILE_MANIFEST: u8 = 0x82;
-// MSG_SFTP_* constants removed — SFTP uses raw stream protocol now.
 const MSG_EOF: u8 = 0x70;
 const MSG_CLOSE: u8 = 0x71;
 
@@ -57,29 +46,6 @@ pub enum ControlMsg {
     AuthFailure {
         message: String,
     },
-    TcpipForwardRequest {
-        bind_addr: String,
-        bind_port: u16,
-    },
-    TcpipForwardSuccess {
-        bound_port: u16,
-    },
-    CancelTcpipForward {
-        bind_addr: String,
-        bind_port: u16,
-    },
-    UdpForwardRequest {
-        bind_addr: String,
-        bind_port: u16,
-    },
-    CancelUdpForward {
-        bind_addr: String,
-        bind_port: u16,
-    },
-    Disconnect {
-        reason: u32,
-        description: String,
-    },
 }
 
 // -- Channel messages (per-channel bidi streams) --
@@ -93,16 +59,6 @@ pub enum TransferDirection {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ChannelType {
     Session,
-    DirectTcpip {
-        host: String,
-        port: u16,
-        originator_host: String,
-        originator_port: u16,
-    },
-    DirectUdp {
-        host: String,
-        port: u16,
-    },
     FileTransfer {
         direction: TransferDirection,
         path: String,
@@ -137,9 +93,6 @@ pub enum ChannelMsg {
     ExecRequest {
         command: String,
     },
-    SubsystemRequest {
-        name: String,
-    },
     Data {
         payload: Vec<u8>,
     },
@@ -151,16 +104,8 @@ pub enum ChannelMsg {
         cols: u32,
         rows: u32,
     },
-    Signal {
-        name: String,
-    },
     ExitStatus {
         code: u32,
-    },
-    ExitSignal {
-        signal: String,
-        core_dumped: bool,
-        message: String,
     },
     FileHeader {
         path: String,
@@ -178,7 +123,6 @@ pub enum ChannelMsg {
     FileManifest {
         entries: Vec<ManifestEntry>,
     },
-    // SFTP commands moved to raw stream protocol (SftpCmd/SftpResp).
     Eof,
     Close,
 }
@@ -201,12 +145,6 @@ impl ControlMsg {
             Self::AuthRequest { .. } => MSG_AUTH_REQUEST,
             Self::AuthSuccess => MSG_AUTH_SUCCESS,
             Self::AuthFailure { .. } => MSG_AUTH_FAILURE,
-            Self::TcpipForwardRequest { .. } => MSG_TCPIP_FORWARD_REQUEST,
-            Self::TcpipForwardSuccess { .. } => MSG_TCPIP_FORWARD_SUCCESS,
-            Self::CancelTcpipForward { .. } => MSG_CANCEL_TCPIP_FORWARD,
-            Self::UdpForwardRequest { .. } => MSG_UDP_FORWARD_REQUEST,
-            Self::CancelUdpForward { .. } => MSG_CANCEL_UDP_FORWARD,
-            Self::Disconnect { .. } => MSG_DISCONNECT,
         }
     }
 
@@ -249,13 +187,10 @@ impl ChannelMsg {
             Self::PtySuccess => MSG_PTY_SUCCESS,
             Self::ShellRequest => MSG_SHELL_REQUEST,
             Self::ExecRequest { .. } => MSG_EXEC_REQUEST,
-            Self::SubsystemRequest { .. } => MSG_SUBSYSTEM_REQUEST,
             Self::Data { .. } => MSG_DATA,
             Self::ExtendedData { .. } => MSG_EXTENDED_DATA,
             Self::WindowChange { .. } => MSG_WINDOW_CHANGE,
-            Self::Signal { .. } => MSG_SIGNAL,
             Self::ExitStatus { .. } => MSG_EXIT_STATUS,
-            Self::ExitSignal { .. } => MSG_EXIT_SIGNAL,
             Self::FileHeader { .. } => MSG_FILE_HEADER,
             Self::FileResult { .. } => MSG_FILE_RESULT,
             Self::FileManifest { .. } => MSG_FILE_MANIFEST,
@@ -702,26 +637,6 @@ impl RawChunkHeader {
             chunk_length: u64::from_be_bytes(meta_buf[36..44].try_into().unwrap()),
         })
     }
-}
-
-/// Encode a download request on a metadata bidi stream.
-pub fn encode_download_request(path: &str) -> Vec<u8> {
-    let path_bytes = path.as_bytes();
-    let mut buf = Vec::with_capacity(1 + 2 + path_bytes.len());
-    buf.push(RAW_DOWNLOAD_REQUEST);
-    buf.extend_from_slice(&(path_bytes.len() as u16).to_be_bytes());
-    buf.extend_from_slice(path_bytes);
-    buf
-}
-
-/// Encode a manifest request on a metadata bidi stream.
-pub fn encode_manifest_request(path: &str) -> Vec<u8> {
-    let path_bytes = path.as_bytes();
-    let mut buf = Vec::with_capacity(1 + 2 + path_bytes.len());
-    buf.push(RAW_MANIFEST_REQUEST);
-    buf.extend_from_slice(&(path_bytes.len() as u16).to_be_bytes());
-    buf.extend_from_slice(path_bytes);
-    buf
 }
 
 /// Encode a manifest response on a metadata bidi stream.

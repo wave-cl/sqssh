@@ -7,7 +7,7 @@ use std::time::Instant;
 use clap::Parser;
 use sqssh_core::client;
 use sqssh_core::protocol::{
-    self, ChannelType, ManifestEntry, RawChunkHeader, RawFileHeader, RAW_CHUNK_SIZE,
+    self, ChannelType, RawChunkHeader, RawFileHeader, RAW_CHUNK_SIZE,
     RAW_DOWNLOAD_CHUNK, RAW_DOWNLOAD_DATA, RAW_MANIFEST_RESPONSE, RAW_TRANSFER_RESULT,
 };
 use sqssh_core::stream::Channel;

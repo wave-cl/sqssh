@@ -2,7 +2,6 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use sqssh_core::protocol::{ManifestEntry, RawFileHeader, SftpCmd, SftpResp, RAW_CHUNK_SIZE};
-use tokio::io::AsyncWriteExt;
 
 /// Maximum path length.
 const MAX_PATH_LEN: usize = 4096;

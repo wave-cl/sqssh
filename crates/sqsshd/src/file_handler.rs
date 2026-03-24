@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use sqssh_core::protocol::{
     self, ManifestEntry, RawFileHeader, RAW_CHUNK_SIZE, RAW_DOWNLOAD_DATA,
-    RAW_DOWNLOAD_REQUEST, RAW_MANIFEST_REQUEST, RAW_TRANSFER_RESULT,
 };
 
 /// Maximum path component length to prevent abuse.
@@ -171,73 +170,6 @@ pub async fn receive_raw_file(
             libc::timeval { tv_sec: mtime as libc::time_t, tv_usec: 0 },
         ];
         unsafe { libc::utimes(c_path.as_ptr(), times.as_ptr()); }
-    }
-
-    Ok(())
-}
-
-/// Handle a metadata bidi stream for download requests and manifests.
-pub async fn handle_metadata_stream(
-    conn: &quinn::Connection,
-    mut meta_send: quinn::SendStream,
-    mut meta_recv: quinn::RecvStream,
-    username: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // First byte is the request type (already consumed by caller via type_buf)
-    // Actually, caller reads type and passes it. Let's read it here.
-    let mut type_buf = [0u8; 1];
-    meta_recv.read_exact(&mut type_buf).await
-        .map_err(|e| format!("failed to read metadata request type: {e}"))?;
-
-    let (_uid, _gid, home, _shell) = super::pty_handler::lookup_user(username)?;
-
-    match type_buf[0] {
-        RAW_DOWNLOAD_REQUEST => {
-            let path = protocol::decode_path(&mut meta_recv).await?;
-            let source = validate_path(Path::new(&home), &path)
-                .map_err(|e| format!("invalid path: {e}"))?;
-
-            let meta = std::fs::metadata(&source)?;
-            if meta.is_dir() {
-                // Send manifest on bidi, then send files on uni streams
-                let entries = walk_directory(&source, &source)?;
-                let manifest = protocol::encode_manifest_response(&entries);
-                meta_send.write_all(&manifest).await
-                    .map_err(|e| format!("failed to send manifest: {e}"))?;
-
-                // Send each file on a separate uni stream
-                let file_entries: Vec<_> = entries.iter().filter(|e| !e.is_dir).collect();
-                for entry in file_entries {
-                    let file_path = source.join(&entry.path);
-                    send_file_raw(conn, &file_path, &entry.path).await?;
-                }
-            } else {
-                // Single file: signal on bidi, then send on uni stream
-                let signal = [RAW_DOWNLOAD_DATA];
-                meta_send.write_all(&signal).await
-                    .map_err(|e| format!("failed to send signal: {e}"))?;
-
-                let filename = source
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                send_file_raw(conn, &source, &filename).await?;
-            }
-        }
-        RAW_MANIFEST_REQUEST => {
-            let path = protocol::decode_path(&mut meta_recv).await?;
-            let source = validate_path(Path::new(&home), &path)
-                .map_err(|e| format!("invalid path: {e}"))?;
-
-            let entries = walk_directory(&source, &source)?;
-            let manifest = protocol::encode_manifest_response(&entries);
-            meta_send.write_all(&manifest).await
-                .map_err(|e| format!("failed to send manifest: {e}"))?;
-        }
-        other => {
-            let result = protocol::encode_transfer_result(false, &format!("unknown request type: {other:#x}"));
-            meta_send.write_all(&result).await.ok();
-        }
     }
 
     Ok(())

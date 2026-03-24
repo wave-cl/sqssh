@@ -7,7 +7,6 @@
 //! 4. sqssh-persist sends fds + payload back via sendmsg
 //! 5. sqssh-persist exits
 
-use std::os::unix::io::RawFd;
 use std::os::unix::net::UnixListener;
 use std::path::Path;
 

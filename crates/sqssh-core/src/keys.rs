@@ -61,12 +61,12 @@ pub fn decode_pubkey(s: &str) -> Result<VerifyingKey> {
 }
 
 /// Encode a private key seed as base58.
-pub fn encode_private_key(key: &SigningKey) -> Zeroizing<String> {
+fn encode_private_key(key: &SigningKey) -> Zeroizing<String> {
     Zeroizing::new(bs58::encode(key.to_bytes()).into_string())
 }
 
 /// Decode a base58-encoded private key seed.
-pub fn decode_private_key(s: &str) -> Result<SigningKey> {
+fn decode_private_key(s: &str) -> Result<SigningKey> {
     let bytes = Zeroizing::new(bs58::decode(s).into_vec()?);
     if bytes.len() != 32 {
         return Err(Error::InvalidKeyFormat(format!(
@@ -228,13 +228,6 @@ pub fn prompt_passphrase(prompt: &str) -> Result<Zeroizing<String>> {
     Ok(Zeroizing::new(line.trim_end().to_string()))
 }
 
-/// Check if a key file is encrypted (without reading the full file).
-pub fn is_encrypted_key(path: &Path) -> bool {
-    fs::read_to_string(path)
-        .map(|c| c.starts_with(ENCRYPTED_KEY_HEADER))
-        .unwrap_or(false)
-}
-
 /// Save a public key to a file.
 pub fn save_public_key(path: &Path, key: &VerifyingKey, comment: &str) -> Result<()> {
     let encoded = encode_pubkey(key);
@@ -350,7 +343,7 @@ pub fn ensure_sqssh_dir() -> Result<std::path::PathBuf> {
 
 /// Load the key_map file (~/.sqssh/key_map).
 /// Returns a map of hostname → key name (relative to ~/.sqssh/).
-pub fn load_key_map() -> std::collections::HashMap<String, String> {
+fn load_key_map() -> std::collections::HashMap<String, String> {
     use std::collections::HashMap;
 
     let mut map = HashMap::new();
@@ -410,7 +403,6 @@ pub fn key_for_host(host: &str) -> Option<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     #[test]
     fn test_keypair_roundtrip() {
