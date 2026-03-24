@@ -95,9 +95,11 @@ pub async fn run_exec(
     Ok(())
 }
 
-/// Check if ~/.hushlogin exists for the user.
+/// Check if ~/.hushlogin exists for the user (no symlink following).
 fn has_hushlogin(home: &str) -> bool {
-    Path::new(home).join(".hushlogin").exists()
+    std::fs::symlink_metadata(Path::new(home).join(".hushlogin"))
+        .map(|m| m.is_file())
+        .unwrap_or(false)
 }
 
 /// Read and format the last login time from lastlog.
