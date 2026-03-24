@@ -210,7 +210,16 @@ fn read_motd() -> Option<String> {
     Some(content.replace('\n', "\r\n"))
 }
 
+/// Information about a spawned shell, for session persistence.
+pub struct SpawnedShell {
+    pub master_raw_fd: std::os::unix::io::RawFd,
+    pub child_pid: u32,
+    pub home: String,
+    pub shell: String,
+}
+
 /// Spawn a shell attached to a PTY and relay I/O over the channel.
+/// Returns the SpawnedShell info (for persistence) before entering the relay loop.
 pub async fn run_shell(
     channel: &mut Channel,
     username: &str,
@@ -220,10 +229,10 @@ pub async fn run_shell(
     rows: u16,
     print_motd: bool,
     print_last_log: bool,
+    on_spawn: impl FnOnce(&SpawnedShell),
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (uid, gid, home, shell) = lookup_user(username)?;
 
-    // Print login messages before spawning the shell (like sshd does)
     if !has_hushlogin(&home) {
         if print_last_log {
             if let Some(last_login_msg) = get_and_update_lastlog(uid, remote_host) {
@@ -250,10 +259,8 @@ pub async fn run_shell(
     let master_fd = pty.master;
     let slave_fd = pty.slave;
 
-    // Set window size
     set_winsize(master_fd.as_raw_fd(), cols, rows);
 
-    // Spawn the shell as the target user
     let slave_raw = slave_fd.as_raw_fd();
     let username_owned = username.to_string();
 
@@ -279,14 +286,21 @@ pub async fn run_shell(
     }
 
     let mut child = cmd.spawn()?;
-    drop(slave_fd); // Close slave in parent
+    drop(slave_fd);
 
-    // Set master fd non-blocking for async I/O
     let master_raw = master_fd.as_raw_fd();
     unsafe {
         let flags = libc::fcntl(master_raw, libc::F_GETFL);
         libc::fcntl(master_raw, libc::F_SETFL, flags | libc::O_NONBLOCK);
     }
+
+    // Notify caller of spawn info (for session registration)
+    on_spawn(&SpawnedShell {
+        master_raw_fd: master_raw,
+        child_pid: child.id(),
+        home: home.clone(),
+        shell: shell.clone(),
+    });
 
     let master_afd = AsyncFd::new(master_fd)?;
 
@@ -361,6 +375,129 @@ pub async fn run_shell(
     // Wait for child and send exit status
     let status = child.wait()?;
     let code = status.code().unwrap_or(1) as u32;
+    let _ = channel.send(&ChannelMsg::ExitStatus { code }).await;
+    let _ = channel.send(&ChannelMsg::Eof).await;
+    let _ = channel.send(&ChannelMsg::Close).await;
+
+    Ok(())
+}
+
+/// Resume a persisted PTY session from a raw master fd.
+pub async fn resume_shell(
+    channel: &mut Channel,
+    master_raw_fd: std::os::unix::io::RawFd,
+    child_pid: u32,
+    cols: u16,
+    rows: u16,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use std::os::fd::FromRawFd;
+
+    // Set window size to client's current size (will be updated via WindowChange)
+    set_winsize(master_raw_fd, cols, rows);
+
+    // Set non-blocking
+    unsafe {
+        let flags = libc::fcntl(master_raw_fd, libc::F_GETFL);
+        libc::fcntl(master_raw_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+    }
+
+    // Wrap in OwnedFd for AsyncFd
+    let master_fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(master_raw_fd) };
+    let master_afd = AsyncFd::new(master_fd)?;
+
+    // Wait for client to send PtyRequest + ShellRequest (the reconnect handshake)
+    loop {
+        let msg = channel.recv().await?;
+        match msg {
+            ChannelMsg::PtyRequest { cols: c, rows: r, .. } => {
+                set_winsize(master_afd.get_ref().as_raw_fd(), c as u16, r as u16);
+                channel.send(&ChannelMsg::PtySuccess).await?;
+            }
+            ChannelMsg::ShellRequest => {
+                break;
+            }
+            other => {
+                tracing::debug!("resume: ignoring pre-shell message: {other:?}");
+            }
+        }
+    }
+
+    // Run the relay loop (same as normal shell)
+    loop {
+        tokio::select! {
+            ready = master_afd.readable() => {
+                let mut guard = ready?;
+                match guard.try_io(|inner| {
+                    let mut buf = [0u8; 8192];
+                    let n = unsafe {
+                        libc::read(
+                            inner.as_raw_fd(),
+                            buf.as_mut_ptr() as *mut libc::c_void,
+                            buf.len(),
+                        )
+                    };
+                    if n < 0 {
+                        Err(std::io::Error::last_os_error())
+                    } else if n == 0 {
+                        Ok(Vec::new())
+                    } else {
+                        Ok(buf[..n as usize].to_vec())
+                    }
+                }) {
+                    Ok(Ok(data)) if data.is_empty() => break,
+                    Ok(Ok(data)) => {
+                        if channel.send(&ChannelMsg::Data { payload: data }).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        tracing::error!("PTY read error: {e}");
+                        break;
+                    }
+                    Err(_would_block) => continue,
+                }
+            }
+
+            msg = channel.recv() => {
+                match msg {
+                    Ok(ChannelMsg::Data { payload }) => {
+                        let fd = master_afd.get_ref().as_raw_fd();
+                        let mut offset = 0;
+                        while offset < payload.len() {
+                            let n = unsafe {
+                                libc::write(
+                                    fd,
+                                    payload[offset..].as_ptr() as *const libc::c_void,
+                                    payload.len() - offset,
+                                )
+                            };
+                            if n <= 0 { break; }
+                            offset += n as usize;
+                        }
+                    }
+                    Ok(ChannelMsg::WindowChange { cols, rows }) => {
+                        set_winsize(master_afd.get_ref().as_raw_fd(), cols as u16, rows as u16);
+                    }
+                    Ok(ChannelMsg::Eof) | Ok(ChannelMsg::Close) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        }
+    }
+
+    // Wait for child (if it's still alive)
+    let mut status = 0i32;
+    let ret = unsafe { libc::waitpid(child_pid as i32, &mut status, libc::WNOHANG) };
+    let code = if ret > 0 {
+        if libc::WIFEXITED(status) {
+            libc::WEXITSTATUS(status) as u32
+        } else {
+            1
+        }
+    } else {
+        0
+    };
+
     let _ = channel.send(&ChannelMsg::ExitStatus { code }).await;
     let _ = channel.send(&ChannelMsg::Eof).await;
     let _ = channel.send(&ChannelMsg::Close).await;

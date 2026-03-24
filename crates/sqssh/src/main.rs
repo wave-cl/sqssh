@@ -1,5 +1,6 @@
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use clap::Parser;
 use sqssh_core::config::ClientConfig;
@@ -85,6 +86,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     // Load identity key
     let identity_path = cli
         .identity
+        .clone()
         .or(resolved.identity_file.map(PathBuf::from))
         .unwrap_or_else(|| sqssh_dir.join("id_ed25519"));
     let signing_key = keys::load_private_key(&identity_path)?;
@@ -138,25 +140,127 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    if cli.command.is_empty() {
-        // Interactive shell
-        run_interactive_shell(&mut channel, &conn).await
-    } else {
-        // Remote command
+    if !cli.command.is_empty() {
         let cmd = cli.command.join(" ");
-        run_remote_command(&mut channel, &cmd).await
+        return run_remote_command(&mut channel, &cmd).await;
     }
+
+    // Interactive shell with auto-reconnect (handled inside)
+    run_interactive_shell(&mut channel, &conn).await
 }
 
-async fn run_interactive_shell(
+async fn reconnect_shell(
+    stdin_rx: &mut tokio::sync::mpsc::Receiver<Vec<u8>>,
+) -> Result<i32, Box<dyn std::error::Error>> {
+    // Re-read CLI args from the process args
+    let cli = Cli::parse();
+    let (user, host) = parse_destination(&cli.destination)?;
+    let sqssh_dir = keys::sqssh_dir()?;
+    let config = ClientConfig::load(&sqssh_dir.join("config"))?;
+    let resolved = config.resolve(&host);
+
+    let actual_host = resolved.hostname.as_deref().unwrap_or(&host);
+    let port = cli.port.unwrap_or(resolved.port);
+    let user = user
+        .or(resolved.user.clone())
+        .unwrap_or_else(|| whoami::username());
+
+    let server_pubkey = if let Some(ref hk) = resolved.host_key {
+        keys::decode_pubkey(hk)?
+    } else {
+        let known_hosts = KnownHosts::load(&sqssh_dir.join("known_hosts"))?;
+        *known_hosts.lookup(actual_host).ok_or_else(|| {
+            sqssh_core::error::Error::UnknownHost(actual_host.to_string())
+        })?
+    };
+
+    let addr: SocketAddr = format!("{actual_host}:{port}")
+        .to_socket_addrs()?
+        .next()
+        .ok_or("could not resolve address")?;
+
+    let identity_path = cli
+        .identity
+        .clone()
+        .or(resolved.identity_file.map(PathBuf::from))
+        .unwrap_or_else(|| sqssh_dir.join("id_ed25519"));
+    let signing_key = keys::load_private_key(&identity_path)?;
+    let verifying_key = signing_key.verifying_key();
+
+    let client_key_hex = signing_key
+        .to_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
+    let squic_config = squic::Config {
+        alpn_protocols: vec![protocol::ALPN.to_vec()],
+        keep_alive: Some(Duration::from_secs(resolved.keepalive_interval)),
+        client_key: Some(client_key_hex),
+        handshake_timeout: Some(Duration::from_millis(1500)),
+        ..Default::default()
+    };
+
+    let conn = squic::dial(addr, server_pubkey.as_bytes(), squic_config).await?;
+
+    let mut control = ControlChannel::open(&conn).await?;
+    control
+        .send(&ControlMsg::AuthRequest {
+            username: user.clone(),
+            pubkey: verifying_key.as_bytes().to_vec(),
+        })
+        .await?;
+
+    match control.recv().await? {
+        ControlMsg::AuthSuccess => {}
+        ControlMsg::AuthFailure { message } => {
+            return Err(format!("authentication failed: {message}").into());
+        }
+        other => {
+            return Err(format!("unexpected response: {other:?}").into());
+        }
+    }
+
+    let mut channel = Channel::open(&conn, ChannelType::Session).await?;
+    match channel.recv().await? {
+        ChannelMsg::ChannelOpenConfirm => {}
+        ChannelMsg::ChannelOpenFailure { description, .. } => {
+            return Err(format!("channel open failed: {description}").into());
+        }
+        other => {
+            return Err(format!("unexpected: {other:?}").into());
+        }
+    }
+
+    eprintln!("Reconnected.");
+
+    start_shell_session(&mut channel).await?;
+
+    // Set raw mode for the reconnected session
+    let orig_termios = set_raw_mode()?;
+    unsafe {
+        libc::signal(libc::SIGINT, libc::SIG_IGN);
+        libc::signal(libc::SIGQUIT, libc::SIG_IGN);
+    }
+
+    let result = relay_stdio(&mut channel, stdin_rx).await;
+
+    unsafe {
+        libc::signal(libc::SIGINT, libc::SIG_DFL);
+        libc::signal(libc::SIGQUIT, libc::SIG_DFL);
+    }
+    restore_terminal(&orig_termios);
+
+    conn.close(quinn::VarInt::from_u32(0), b"client disconnect");
+
+    result
+}
+
+async fn start_shell_session(
     channel: &mut Channel,
-    conn: &quinn::Connection,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Get terminal size
     let (cols, rows) = term_size();
     let term = std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".into());
 
-    // Request PTY
     channel
         .send(&ChannelMsg::PtyRequest {
             term,
@@ -172,33 +276,85 @@ async fn run_interactive_shell(
         }
     }
 
-    // Request shell
     channel.send(&ChannelMsg::ShellRequest).await?;
+    Ok(())
+}
 
-    // Set local terminal to raw mode
+/// Spawn a single stdin reader thread that lives for the process lifetime.
+fn spawn_stdin_reader() -> tokio::sync::mpsc::Receiver<Vec<u8>> {
+    let (stdin_tx, stdin_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+    tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        let mut buf = vec![0u8; 4096];
+        loop {
+            match std::io::stdin().read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if stdin_tx.blocking_send(buf[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    stdin_rx
+}
+
+async fn run_interactive_shell(
+    channel: &mut Channel,
+    conn: &quinn::Connection,
+) -> Result<(), Box<dyn std::error::Error>> {
+    start_shell_session(channel).await?;
+
     let orig_termios = set_raw_mode()?;
-
-    // Ignore SIGINT/SIGQUIT — raw mode sends Ctrl+C/Ctrl+\ as data to the
-    // remote side; the default signal handlers must not kill us locally.
     unsafe {
         libc::signal(libc::SIGINT, libc::SIG_IGN);
         libc::signal(libc::SIGQUIT, libc::SIG_IGN);
     }
 
-    let result = relay_stdio(channel).await;
+    let mut stdin_rx = spawn_stdin_reader();
+    let result = relay_stdio(channel, &mut stdin_rx).await;
 
-    // Restore terminal and signal handlers
     unsafe {
         libc::signal(libc::SIGINT, libc::SIG_DFL);
         libc::signal(libc::SIGQUIT, libc::SIG_DFL);
     }
     restore_terminal(&orig_termios);
 
-    // Close the QUIC connection so the server cleans up
+    match &result {
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("connection lost") || msg.contains("stream finished") {
+                conn.close(quinn::VarInt::from_u32(0), b"reconnecting");
+                eprintln!("\r\nConnection lost. Reconnecting...");
+
+                // Reconnect loop — reuse the same stdin reader
+                let mut attempt = 0u32;
+
+                loop {
+                    // Fast retries: 500ms, 1s, 2s, 4s, ... max 30s
+                    let delay = if attempt == 0 {
+                        Duration::from_millis(500)
+                    } else {
+                        Duration::from_secs((1 << (attempt - 1).min(4)) as u64)
+                    };
+                    tokio::time::sleep(delay).await;
+                    attempt += 1;
+
+                    match reconnect_shell(&mut stdin_rx).await {
+                        Ok(code) => std::process::exit(code),
+                        Err(_) => {
+                            eprint!(".");
+                        }
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+
     conn.close(quinn::VarInt::from_u32(0), b"client disconnect");
 
-    // Exit immediately — the blocking stdin reader thread would otherwise
-    // keep the process alive until the next keypress.
     match result {
         Ok(code) => std::process::exit(code),
         Err(e) => {
@@ -255,25 +411,12 @@ enum EscapeState {
     SawTilde,
 }
 
-async fn relay_stdio(channel: &mut Channel) -> Result<i32, Box<dyn std::error::Error>> {
+async fn relay_stdio(
+    channel: &mut Channel,
+    stdin_rx: &mut tokio::sync::mpsc::Receiver<Vec<u8>>,
+) -> Result<i32, Box<dyn std::error::Error>> {
     let mut exit_code = 0i32;
-    let mut escape = EscapeState::AfterNewline; // start as "after newline"
-
-    let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
-    tokio::task::spawn_blocking(move || {
-        use std::io::Read;
-        let mut buf = vec![0u8; 4096];
-        loop {
-            match std::io::stdin().read(&mut buf) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    if stdin_tx.blocking_send(buf[..n].to_vec()).is_err() {
-                        break;
-                    }
-                }
-            }
-        }
-    });
+    let mut escape = EscapeState::AfterNewline;
 
     loop {
         tokio::select! {

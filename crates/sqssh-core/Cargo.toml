@@ -19,6 +19,7 @@ tokio-util = { workspace = true }
 quinn = { workspace = true }
 rand = { workspace = true }
 whoami = { workspace = true }
+libc = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -1,5 +1,7 @@
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,10 +11,11 @@ use ed25519_dalek::VerifyingKey;
 use sqssh_core::auth::{AuthMode, AuthorizedKeys};
 use sqssh_core::config::ServerConfig;
 use sqssh_core::keys;
+use sqssh_core::persist::PersistedSession;
 use sqssh_core::protocol::{self, ChannelMsg, ChannelType, ControlMsg, CtlRequest, CtlResponse};
 use sqssh_core::stream::{Channel, ControlChannel};
 use tokio::signal::unix::{signal, SignalKind};
-use tokio::sync::{watch, RwLock};
+use tokio::sync::{watch, Mutex, RwLock};
 use tokio::task::JoinSet;
 use tracing::Instrument;
 
@@ -65,6 +68,12 @@ struct Cli {
 }
 
 /// Shared server state passed to connection handlers.
+/// An active PTY session that can be persisted.
+struct ActivePtySession {
+    info: PersistedSession,
+    master_fd: RawFd,
+}
+
 struct ServerState {
     authorized_keys: RwLock<AuthorizedKeys>,
     auth_mode: AuthMode,
@@ -79,6 +88,13 @@ struct ServerState {
     max_auth_tries: usize,
     max_sessions: usize,
     active_sessions: std::sync::atomic::AtomicUsize,
+    /// Active PTY sessions indexed by a unique session ID.
+    pty_sessions: Mutex<HashMap<u64, ActivePtySession>>,
+    /// Next session ID counter.
+    next_session_id: std::sync::atomic::AtomicU64,
+    /// Recovered sessions from sqssh-persist, waiting for clients to reconnect.
+    /// Keyed by (pubkey, username).
+    pending_sessions: Mutex<HashMap<([u8; 32], String), (RawFd, PersistedSession)>>,
 }
 
 /// Convert an Ed25519 pubkey to X25519 bytes for the squic whitelist.
@@ -228,7 +244,13 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         max_auth_tries: server_config.max_auth_tries,
         max_sessions: server_config.max_sessions,
         active_sessions: std::sync::atomic::AtomicUsize::new(0),
+        pty_sessions: Mutex::new(HashMap::new()),
+        next_session_id: std::sync::atomic::AtomicU64::new(1),
+        pending_sessions: Mutex::new(HashMap::new()),
     });
+
+    // Check for persisted sessions from a previous sqsshd instance
+    recover_persisted_sessions(&state).await;
 
     // Spawn control socket listener
     let ctl_state = state.clone();
@@ -244,6 +266,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Signal handlers
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
+    let mut sigusr1 = signal(SignalKind::user_defined1())?;
 
     // Connection task tracker
     let mut tasks: JoinSet<()> = JoinSet::new();
@@ -278,6 +301,18 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 tracing::info!("received SIGINT, shutting down");
                 break;
             }
+            _ = sigusr1.recv() => {
+                tracing::info!("received SIGUSR1, persisting sessions for restart");
+                persist_sessions(&state).await;
+                // Close listener and exit quickly — sessions are persisted
+                state.listener.close(quinn::VarInt::from_u32(0), b"server restarting");
+                shutdown_tx.send(true).ok();
+                // Short drain to let disconnect messages send
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                std::fs::remove_file(&server_config.control_socket).ok();
+                tracing::info!("sqsshd shutdown complete (restart)");
+                std::process::exit(0);
+            }
             // Reap completed tasks
             Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
         }
@@ -310,7 +345,9 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     std::fs::remove_file(&server_config.control_socket).ok();
 
     tracing::info!("sqsshd shutdown complete");
-    Ok(())
+
+    // Force exit — tokio runtime and QUIC endpoint hold resources that prevent clean drop
+    std::process::exit(0);
 }
 
 // -- Control socket (sqsshctl communication) --
@@ -486,6 +523,139 @@ fn update_whitelist(state: &ServerState, old_keys: &[[u8; 32]], new_keys: &[[u8;
     }
 }
 
+// -- Session persistence --
+
+async fn persist_sessions(state: &ServerState) {
+    use sqssh_core::fdpass;
+    use sqssh_core::persist::PersistPayload;
+
+    let sessions = state.pty_sessions.lock().await;
+    if sessions.is_empty() {
+        tracing::info!("no active PTY sessions to persist");
+        return;
+    }
+
+    // Start sqssh-persist helper
+    let persist_result = std::process::Command::new("sqssh-persist")
+        .spawn();
+
+    let mut persist_child = match persist_result {
+        Ok(child) => child,
+        Err(e) => {
+            tracing::error!("failed to start sqssh-persist: {e}");
+            return;
+        }
+    };
+
+    // Give it a moment to bind the socket
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Connect to persist helper
+    let stream = match std::os::unix::net::UnixStream::connect("/run/sqssh/persist.sock") {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("failed to connect to sqssh-persist: {e}");
+            persist_child.kill().ok();
+            return;
+        }
+    };
+
+    let mut fds = Vec::new();
+    let mut payload_sessions = Vec::new();
+
+    for (_id, session) in sessions.iter() {
+        fds.push(session.master_fd);
+        payload_sessions.push(session.info.clone());
+    }
+
+    let payload = PersistPayload {
+        sessions: payload_sessions,
+    };
+
+    let data = match payload.encode() {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::error!("failed to encode persist payload: {e}");
+            return;
+        }
+    };
+
+    if let Err(e) = fdpass::send_fds(&stream, &fds, &data) {
+        tracing::error!("failed to send fds to sqssh-persist: {e}");
+        return;
+    }
+
+    tracing::info!("persisted {} session(s) to sqssh-persist", fds.len());
+}
+
+async fn recover_persisted_sessions(state: &ServerState) {
+    use sqssh_core::fdpass;
+    use sqssh_core::persist::PersistPayload;
+
+    // Try to connect to existing sqssh-persist
+    let stream = match std::os::unix::net::UnixStream::connect("/run/sqssh/persist.sock") {
+        Ok(s) => s,
+        Err(_) => return, // No persist helper running — normal startup
+    };
+
+    tracing::info!("found sqssh-persist, recovering sessions...");
+
+    let (fds, data) = match fdpass::recv_fds(&stream, 256) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("failed to receive from sqssh-persist: {e}");
+            return;
+        }
+    };
+
+    let payload = match PersistPayload::decode(&data) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!("failed to decode persist payload: {e}");
+            return;
+        }
+    };
+
+    if fds.len() != payload.sessions.len() {
+        tracing::error!(
+            "fd count ({}) doesn't match session count ({})",
+            fds.len(),
+            payload.sessions.len()
+        );
+        return;
+    }
+
+    let mut pending = state.pending_sessions.lock().await;
+
+    for (i, session) in payload.sessions.into_iter().enumerate() {
+        let fd = fds[i];
+
+        // Verify child process is still alive
+        let alive = unsafe { libc::kill(session.child_pid as i32, 0) } == 0;
+        if !alive {
+            tracing::warn!(
+                "session for user '{}' (pid {}) is dead, skipping",
+                session.username,
+                session.child_pid
+            );
+            unsafe { libc::close(fd); }
+            continue;
+        }
+
+        tracing::info!(
+            "recovered session: user={}, pid={}, fd={}",
+            session.username,
+            session.child_pid,
+            fd
+        );
+
+        let key = (session.client_pubkey, session.username.clone());
+        pending.insert(key, (fd, session));
+    }
+
+    tracing::info!("recovered {} pending session(s)", pending.len());
+}
+
 // -- Connection handling --
 
 async fn handle_connection(
@@ -501,7 +671,7 @@ async fn handle_connection(
 
     // Auth loop with MaxAuthTries
     let mut auth_attempts = 0usize;
-    let (username, _pubkey_bytes) = loop {
+    let (username, pubkey_bytes) = loop {
         let auth_msg = control.recv().await?;
         let (username, pubkey_bytes) = match auth_msg {
             ControlMsg::AuthRequest {
@@ -582,6 +752,13 @@ async fn handle_connection(
     control.send(&ControlMsg::AuthSuccess).await?;
     tracing::info!(user = %username, "auth success");
 
+    // Check for a pending persisted session
+    let pending_key = (pubkey_bytes, username.clone());
+    let mut pending_session = {
+        let mut pending = state.pending_sessions.lock().await;
+        pending.remove(&pending_key)
+    };
+
     // Read banner file content for sending on first session channel
     let banner_content = state.banner.as_ref().and_then(|path| {
         std::fs::read_to_string(path).ok()
@@ -635,9 +812,25 @@ async fn handle_connection(
                 let print_last_log = state.print_last_log;
                 let banner = banner_content.clone();
                 let state_ref = state.clone();
+                let client_pk = pubkey_bytes;
+                let resumed_fd = pending_session.take().map(|(fd, info)| {
+                    tracing::info!(
+                        user = %info.username,
+                        pid = info.child_pid,
+                        "resuming persisted session"
+                    );
+                    (fd, info)
+                });
                 tokio::spawn(
                     async move {
-                        if let Err(e) = handle_session(channel, &user, &remote_host, print_motd, print_last_log, banner).await {
+                        if let Some((fd, info)) = resumed_fd {
+                            if let Err(e) = pty_handler::resume_shell(&mut channel, fd, info.child_pid, info.cols, info.rows).await {
+                                tracing::error!("resume error: {e}");
+                            }
+                        } else if let Err(e) = handle_session_with_persist(
+                            channel, &user, &remote_host, print_motd, print_last_log, banner,
+                            &state_ref, client_pk,
+                        ).await {
                             tracing::error!("session error: {e}");
                         }
                         state_ref.active_sessions.fetch_sub(1, Relaxed);
@@ -742,5 +935,95 @@ async fn handle_session(
         }
     }
 
-    pty_handler::run_shell(&mut channel, username, remote_host, &term, cols, rows, print_motd, print_last_log).await
+    pty_handler::run_shell(&mut channel, username, remote_host, &term, cols, rows, print_motd, print_last_log, |_| {}).await
+}
+
+async fn handle_session_with_persist(
+    mut channel: Channel,
+    username: &str,
+    remote_host: &str,
+    print_motd: bool,
+    print_last_log: bool,
+    banner: Option<String>,
+    state: &Arc<ServerState>,
+    client_pubkey: [u8; 32],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(ref content) = banner {
+        channel
+            .send(&ChannelMsg::Data {
+                payload: content.replace('\n', "\r\n").into_bytes(),
+            })
+            .await?;
+    }
+
+    let mut term = String::from("xterm-256color");
+    let mut cols: u16 = 80;
+    let mut rows: u16 = 24;
+
+    loop {
+        let msg = channel.recv().await?;
+        match msg {
+            ChannelMsg::PtyRequest {
+                term: t,
+                cols: c,
+                rows: r,
+            } => {
+                term = t;
+                cols = c as u16;
+                rows = r as u16;
+                channel.send(&ChannelMsg::PtySuccess).await?;
+            }
+            ChannelMsg::ShellRequest => {
+                break;
+            }
+            ChannelMsg::ExecRequest { command } => {
+                tracing::debug!(cmd = %command, "exec request");
+                pty_handler::run_exec(&mut channel, username, &command).await?;
+                return Ok(());
+            }
+            other => {
+                tracing::debug!("ignoring pre-shell message: {other:?}");
+            }
+        }
+    }
+
+    let user = username.to_string();
+    let term_clone = term.clone();
+    let session_id = state.next_session_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    let (spawn_tx, spawn_rx) = tokio::sync::oneshot::channel::<ActivePtySession>();
+
+    // Spawn a task to register the session once spawn info arrives
+    let state_for_reg = state.clone();
+    tokio::spawn(async move {
+        if let Ok(session) = spawn_rx.await {
+            state_for_reg.pty_sessions.lock().await.insert(session_id, session);
+        }
+    });
+
+    pty_handler::run_shell(
+        &mut channel, username, remote_host, &term, cols, rows, print_motd, print_last_log,
+        move |spawned| {
+            let info = PersistedSession {
+                username: user.clone(),
+                client_pubkey,
+                term: term_clone.clone(),
+                cols,
+                rows,
+                child_pid: spawned.child_pid,
+                home: spawned.home.clone(),
+                shell: spawned.shell.clone(),
+            };
+            tracing::info!(
+                session_id,
+                pid = spawned.child_pid,
+                fd = spawned.master_raw_fd,
+                "registered PTY session for persistence"
+            );
+            let _ = spawn_tx.send(ActivePtySession {
+                info,
+                master_fd: spawned.master_raw_fd,
+            });
+        },
+    ).await
 }

@@ -12,6 +12,7 @@ members = [
     "crates/sqssh-copy-id",
     "crates/sqssh-keyscan",
     "crates/sqsshctl",
+    "crates/sqssh-persist",
 ]
 
 [workspace.dependencies]
