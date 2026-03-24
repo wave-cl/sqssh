@@ -326,15 +326,28 @@ async fn run_interactive_shell(
     match &result {
         Err(e) => {
             let msg = e.to_string();
-            if msg.contains("connection lost") || msg.contains("stream finished") {
+
+            // Server-initiated close (shutdown/restart) — exit cleanly like SSH
+            if msg.contains("server shutting down")
+                || msg.contains("server restarting")
+                || msg.contains("application close")
+            {
+                eprintln!("\r\nConnection closed by remote host.");
+                conn.close(quinn::VarInt::from_u32(0), b"");
+                std::process::exit(0);
+            }
+
+            // Unexpected connection loss (network drop, timeout) — auto-reconnect
+            if msg.contains("connection lost")
+                || msg.contains("stream finished")
+                || msg.contains("timed out")
+            {
                 conn.close(quinn::VarInt::from_u32(0), b"reconnecting");
                 eprintln!("\r\nConnection lost. Reconnecting...");
 
-                // Reconnect loop — reuse the same stdin reader
                 let mut attempt = 0u32;
 
                 loop {
-                    // Fast retries: 500ms, 1s, 2s, 4s, ... max 30s
                     let delay = if attempt == 0 {
                         Duration::from_millis(500)
                     } else {
