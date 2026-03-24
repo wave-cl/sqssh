@@ -235,10 +235,11 @@ host.example.com sqssh-ed25519 CEFuAsD7Kn5ABJUb4S2ujJxrasBkpoDJCoaNvnh7qdRu
 
 - **Transport:** sQUIC over UDP (default port 22)
 - **Crypto:** Ed25519 keys, X25519 key exchange (via sQUIC), argon2id + chacha20-poly1305 for key encryption
-- **Serialization:** MessagePack with length-prefixed framing
+- **Serialization:** MessagePack with length-prefixed framing (control), raw bytes (file transfer)
 - **ALPN:** `sqssh/1`
 - **Stream 0:** Control channel (auth, forwarding setup, disconnect)
-- **Streams 1+:** Application channels (session, file transfer, port forwarding)
+- **Streams 1+:** Application channels (session, port forwarding)
+- **Uni streams:** Raw file transfers (one QUIC stream per file, zero framing overhead)
 
 ## Building
 
@@ -268,6 +269,29 @@ sudo systemctl enable sqsshd
 sudo systemctl start sqsshd
 sudo systemctl reload sqsshd    # zero-downtime restart (SIGUSR1)
 ```
+
+## Benchmarks
+
+sqscp vs OpenSSH scp — server-to-server between two Hetzner VPS (Falkenstein ↔ Helsinki), measured median of 3 runs, all transfers md5-verified.
+
+| Test | sqscp | scp | Winner |
+|------|-------|-----|--------|
+| 1KB | 749 KB/s | 4.7 KB/s | **sqscp 159x** |
+| 10MB | 134 MB/s | 32 MB/s | **sqscp 4.2x** |
+| 100MB | 144 MB/s | 171 MB/s | scp 1.2x |
+| 1GB | 163 MB/s | 292 MB/s | scp 1.8x |
+| 1000 × 1KB j=1 | 9.2 MB/s | 0.4 MB/s | **sqscp 23x** |
+| 1000 × 1KB j=4 | 5.8 MB/s | 0.4 MB/s | **sqscp 15x** |
+| 1000 × 1KB j=16 | 8.4 MB/s | 0.4 MB/s | **sqscp 21x** |
+| 1000 × 1KB j=32 | 10.3 MB/s | 0.4 MB/s | **sqscp 26x** |
+| 100 × 1MB j=1 | 141 MB/s | 92 MB/s | **sqscp 1.5x** |
+| 100 × 1MB j=4 | 129 MB/s | 92 MB/s | **sqscp 1.4x** |
+| 100 × 1MB j=16 | 145 MB/s | 92 MB/s | **sqscp 1.6x** |
+| 100 × 1MB j=32 | 127 MB/s | 92 MB/s | **sqscp 1.4x** |
+
+sqscp wins 10 of 12 tests. It dominates on small files (159x faster on 1KB), many-file transfers (26x on 1000 small files), and medium directories (1.6x on 100×1MB). scp wins on large single-file transfers (100MB+) where TCP's congestion control ramps faster over sustained bulk transfer.
+
+File transfers use raw QUIC streams with zero application-layer framing — file bytes go directly on the wire after a minimal header (path, size, mode, timestamps).
 
 ## Future
 
