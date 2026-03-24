@@ -1,11 +1,13 @@
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 
+use ed25519_dalek::{SigningKey, VerifyingKey};
+
 use crate::config::ClientConfig;
 use crate::error::{Error, Result};
 use crate::keys;
 use crate::known_hosts::KnownHosts;
-use crate::protocol::{self, ControlMsg};
+use crate::protocol::{self, ctl_decode, ctl_encode, AgentRequest, AgentResponse, ControlMsg};
 use crate::stream::ControlChannel;
 
 /// Parsed remote destination.
@@ -81,13 +83,34 @@ pub async fn connect(
         .next()
         .ok_or_else(|| Error::Connection(format!("could not resolve {actual_host}:{port}")))?;
 
-    // Load identity key
-    let identity_path = identity
-        .map(PathBuf::from)
-        .or(resolved.identity_file.map(PathBuf::from))
-        .unwrap_or_else(|| sqssh_dir.join("id_ed25519"));
-    let signing_key = keys::load_private_key(&identity_path)?;
-    let verifying_key = signing_key.verifying_key();
+    // Load identity key — try agent first, then file
+    let (signing_key, verifying_key) = if identity.is_none() {
+        // No explicit identity — try agent
+        match try_agent_key() {
+            Some((sk, vk)) => {
+                tracing::debug!("using key from agent");
+                (sk, vk)
+            }
+            None => {
+                let path = resolved
+                    .identity_file
+                    .as_ref()
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| sqssh_dir.join("id_ed25519"));
+                let sk = keys::load_private_key(&path)?;
+                let vk = sk.verifying_key();
+                (sk, vk)
+            }
+        }
+    } else {
+        let path = identity
+            .map(PathBuf::from)
+            .or(resolved.identity_file.map(PathBuf::from))
+            .unwrap_or_else(|| sqssh_dir.join("id_ed25519"));
+        let sk = keys::load_private_key(&path)?;
+        let vk = sk.verifying_key();
+        (sk, vk)
+    };
 
     // Connect via squic
     let client_key_hex = signing_key
@@ -126,4 +149,54 @@ pub async fn connect(
     }
 
     Ok(Connection { conn, username })
+}
+
+/// Try to get a key from the running sqssh-agent.
+/// Returns None if agent is unavailable or has no keys.
+fn try_agent_key() -> Option<(SigningKey, VerifyingKey)> {
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+
+    let socket_path = std::env::var("SQSSH_AGENT_SOCK")
+        .map(PathBuf::from)
+        .or_else(|_| keys::sqssh_dir().map(|d| d.join("agent.sock")))
+        .ok()?;
+
+    let mut stream = UnixStream::connect(&socket_path).ok()?;
+
+    // List keys
+    let data = ctl_encode(&AgentRequest::ListKeys).ok()?;
+    stream.write_all(&data).ok()?;
+    let response: AgentResponse = ctl_decode(&mut stream).ok()?;
+
+    let pubkey_bytes = match response {
+        AgentResponse::Keys { entries } if !entries.is_empty() => {
+            entries[0].pubkey.clone()
+        }
+        _ => return None,
+    };
+
+    if pubkey_bytes.len() != 32 {
+        return None;
+    }
+
+    // Get seed from agent
+    let mut stream = UnixStream::connect(&socket_path).ok()?;
+    let data = ctl_encode(&AgentRequest::GetSeed {
+        pubkey: pubkey_bytes.clone(),
+    })
+    .ok()?;
+    stream.write_all(&data).ok()?;
+    let response: AgentResponse = ctl_decode(&mut stream).ok()?;
+
+    match response {
+        AgentResponse::Seed { seed } if seed.len() == 32 => {
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&seed);
+            let sk = SigningKey::from_bytes(&arr);
+            let vk = sk.verifying_key();
+            Some((sk, vk))
+        }
+        _ => None,
+    }
 }

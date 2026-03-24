@@ -398,3 +398,35 @@ pub fn ctl_decode<T: for<'de> Deserialize<'de>>(reader: &mut impl std::io::Read)
     rmp_serde::from_slice(&payload)
         .map_err(|e| Error::Serialization(e.to_string()))
 }
+
+// -- Agent protocol (Unix domain socket, sqssh-agent) --
+
+/// Request from sqssh-add or client to sqssh-agent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum AgentRequest {
+    /// Add a key to the agent. Seed is the 32-byte Ed25519 private key seed.
+    AddKey { seed: Vec<u8>, comment: String },
+    /// Remove a specific key by its public key bytes.
+    RemoveKey { pubkey: Vec<u8> },
+    /// Remove all keys.
+    RemoveAll,
+    /// List all loaded keys.
+    ListKeys,
+    /// Get the private key seed for QUIC handshake (returns seed bytes).
+    GetSeed { pubkey: Vec<u8> },
+}
+
+/// Response from sqssh-agent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum AgentResponse {
+    Ok,
+    Keys { entries: Vec<AgentKeyEntry> },
+    Seed { seed: Vec<u8> },
+    Error { message: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentKeyEntry {
+    pub pubkey: Vec<u8>,
+    pub comment: String,
+}

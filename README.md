@@ -23,11 +23,11 @@ Same port number (22), different protocol (UDP instead of TCP). They coexist.
 | `sqssh-keygen` | ✓ | Ed25519 key generation |
 | `sqscp` | ✓ | Parallel secure file copy |
 | `sqsshctl` | ✓ | Live key reload without restart |
+| `sqssh-agent` | ✓ | Key agent daemon |
+| `sqssh-add` | ✓ | Add/list/remove keys in agent |
+| `sqssh-copy-id` | ✓ | Deploy public keys to remote hosts |
+| `sqssh-keyscan` | ✓ | Manage known hosts |
 | `sqsftp` | — | SFTP |
-| `sqssh-agent` | — | Key agent |
-| `sqssh-add` | — | Add keys to agent |
-| `sqssh-copy-id` | — | Deploy public keys to remote hosts |
-| `sqssh-keyscan` | — | Scan host public keys |
 
 ## Quick start
 
@@ -77,6 +77,38 @@ sqsshctl reload-keys --all      # reload all users (root only)
 ```
 
 No server restart required. Communicates over Unix socket (`/run/sqssh/control.sock`).
+
+### Key agent
+
+```
+eval $(sqssh-agent)              # start agent, set SQSSH_AGENT_SOCK
+sqssh-add                        # add default key (~/.sqssh/id_ed25519)
+sqssh-add ~/.sqssh/other_key     # add specific key
+sqssh-add -l                     # list keys in agent
+sqssh-add -D                     # remove all keys
+```
+
+When the agent is running, `sqssh` and `sqscp` use it automatically — no `-i` flag needed.
+
+### Deploy keys to a server
+
+```
+sqssh-copy-id user@host                      # deploy default public key
+sqssh-copy-id -i ~/.sqssh/other.pub user@host  # deploy specific key
+```
+
+Appends the key to remote `~/.sqssh/authorized_keys` and triggers `sqsshctl reload-keys`.
+
+### Manage known hosts
+
+Server keys are distributed out-of-band (no TOFU). Use `sqsshd --show-pubkey` on the server, then add it on the client:
+
+```
+sqssh-keyscan add host.example.com <base58-pubkey>
+sqssh-keyscan list
+sqssh-keyscan remove host.example.com
+sqssh-keyscan fingerprint <base58-pubkey>
+```
 
 ## Authentication
 
