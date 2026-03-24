@@ -6,7 +6,7 @@ use clap::Parser;
 use sqssh_core::config::ClientConfig;
 use sqssh_core::keys;
 use sqssh_core::known_hosts::KnownHosts;
-use sqssh_core::protocol::{self, ChannelMsg, ChannelType, ControlMsg};
+use sqssh_core::protocol::{self, ChannelMsg, ChannelType, ControlMsg, RawShellHeader, ShellControlHeader, ShellControlMsg};
 use sqssh_core::stream::{Channel, ControlChannel};
 use tokio::io::AsyncWriteExt;
 
@@ -137,30 +137,27 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Open a session channel
-    let mut channel = Channel::open(&conn, ChannelType::Session).await?;
-
-    // Wait for ChannelOpenConfirm
-    match channel.recv().await? {
-        ChannelMsg::ChannelOpenConfirm => {}
-        ChannelMsg::ChannelOpenFailure { description, .. } => {
-            return Err(format!("channel open failed: {description}").into());
-        }
-        other => {
-            return Err(format!("unexpected: {other:?}").into());
-        }
-    }
-
     if !cli.command.is_empty() {
+        // Remote command uses framed Session channel
+        let mut channel = Channel::open(&conn, ChannelType::Session).await?;
+        match channel.recv().await? {
+            ChannelMsg::ChannelOpenConfirm => {}
+            ChannelMsg::ChannelOpenFailure { description, .. } => {
+                return Err(format!("channel open failed: {description}").into());
+            }
+            other => {
+                return Err(format!("unexpected: {other:?}").into());
+            }
+        }
         let cmd = cli.command.join(" ");
         return run_remote_command(&mut channel, &cmd).await;
     }
 
-    // Interactive shell with auto-reconnect (handled inside)
-    run_interactive_shell(&mut channel, &conn, &signing_key).await
+    // Interactive shell via raw QUIC streams
+    run_raw_shell(&conn, &signing_key).await
 }
 
-async fn reconnect_shell(
+async fn reconnect_raw_shell(
     stdin_rx: &mut tokio::sync::mpsc::Receiver<Vec<u8>>,
     cached_key: &ed25519_dalek::SigningKey,
 ) -> Result<i32, Box<dyn std::error::Error>> {
@@ -190,7 +187,6 @@ async fn reconnect_shell(
         .next()
         .ok_or("could not resolve address")?;
 
-    // Use cached key — no file re-read, no passphrase prompt
     let signing_key = cached_key.clone();
     let verifying_key = signing_key.verifying_key();
 
@@ -227,29 +223,17 @@ async fn reconnect_shell(
         }
     }
 
-    let mut channel = Channel::open(&conn, ChannelType::Session).await?;
-    match channel.recv().await? {
-        ChannelMsg::ChannelOpenConfirm => {}
-        ChannelMsg::ChannelOpenFailure { description, .. } => {
-            return Err(format!("channel open failed: {description}").into());
-        }
-        other => {
-            return Err(format!("unexpected: {other:?}").into());
-        }
-    }
-
     eprintln!("Reconnected.");
 
-    start_shell_session(&mut channel).await?;
+    let (data_send, data_recv, ctrl_send, ctrl_recv) = open_raw_shell(&conn).await?;
 
-    // Set raw mode for the reconnected session
     let orig_termios = set_raw_mode()?;
     unsafe {
         libc::signal(libc::SIGINT, libc::SIG_IGN);
         libc::signal(libc::SIGQUIT, libc::SIG_IGN);
     }
 
-    let result = relay_stdio(&mut channel, stdin_rx).await;
+    let result = relay_raw_stdio(data_send, data_recv, ctrl_send, ctrl_recv, stdin_rx).await;
 
     unsafe {
         libc::signal(libc::SIGINT, libc::SIG_DFL);
@@ -262,29 +246,22 @@ async fn reconnect_shell(
     result
 }
 
-async fn start_shell_session(
-    channel: &mut Channel,
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn open_raw_shell(
+    conn: &quinn::Connection,
+) -> Result<(quinn::SendStream, quinn::RecvStream, quinn::SendStream, quinn::RecvStream), Box<dyn std::error::Error>> {
     let (cols, rows) = term_size();
     let term = std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".into());
 
-    channel
-        .send(&ChannelMsg::PtyRequest {
-            term,
-            cols: cols as u32,
-            rows: rows as u32,
-        })
-        .await?;
+    // Open data stream (raw bidi for stdin/stdout)
+    let (mut data_send, data_recv) = conn.open_bi().await?;
+    let header = RawShellHeader { term, cols: cols as u32, rows: rows as u32 };
+    data_send.write_all(&header.encode()).await?;
 
-    match channel.recv().await? {
-        ChannelMsg::PtySuccess => {}
-        other => {
-            return Err(format!("PTY request failed: {other:?}").into());
-        }
-    }
+    // Open control stream (for window change, exit status)
+    let (mut ctrl_send, ctrl_recv) = conn.open_bi().await?;
+    ctrl_send.write_all(&ShellControlHeader::encode()).await?;
 
-    channel.send(&ChannelMsg::ShellRequest).await?;
-    Ok(())
+    Ok((data_send, data_recv, ctrl_send, ctrl_recv))
 }
 
 /// Spawn a single stdin reader thread that lives for the process lifetime.
@@ -307,12 +284,11 @@ fn spawn_stdin_reader() -> tokio::sync::mpsc::Receiver<Vec<u8>> {
     stdin_rx
 }
 
-async fn run_interactive_shell(
-    channel: &mut Channel,
+async fn run_raw_shell(
     conn: &quinn::Connection,
     cached_key: &ed25519_dalek::SigningKey,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    start_shell_session(channel).await?;
+    let (data_send, data_recv, ctrl_send, ctrl_recv) = open_raw_shell(conn).await?;
 
     let orig_termios = set_raw_mode()?;
     unsafe {
@@ -321,7 +297,7 @@ async fn run_interactive_shell(
     }
 
     let mut stdin_rx = spawn_stdin_reader();
-    let result = relay_stdio(channel, &mut stdin_rx).await;
+    let result = relay_raw_stdio(data_send, data_recv, ctrl_send, ctrl_recv, &mut stdin_rx).await;
 
     unsafe {
         libc::signal(libc::SIGINT, libc::SIG_DFL);
@@ -333,53 +309,43 @@ async fn run_interactive_shell(
         Err(e) => {
             let msg = e.to_string();
 
-            // Server daemon restarting (SIGUSR1) — reconnect to persisted session
             if msg.contains("server restarting") {
                 conn.close(quinn::VarInt::from_u32(0), b"reconnecting");
                 eprintln!("\r\nServer restarting. Reconnecting...");
-            }
-            // Server daemon stopped or VPS shutdown — exit cleanly
-            else if msg.contains("server shutting down")
+            } else if msg.contains("server shutting down")
                 || msg.contains("application close")
             {
                 eprintln!("\r\nConnection closed by remote host.");
                 conn.close(quinn::VarInt::from_u32(0), b"");
                 std::process::exit(0);
-            }
-            // Network drop / timeout — exit cleanly
-            else if msg.contains("connection lost")
+            } else if msg.contains("connection lost")
                 || msg.contains("stream finished")
                 || msg.contains("timed out")
             {
                 eprintln!("\r\nConnection lost.");
                 conn.close(quinn::VarInt::from_u32(0), b"");
                 std::process::exit(1);
-            }
-            else {
-                // Unknown error — don't reconnect
+            } else {
                 conn.close(quinn::VarInt::from_u32(0), b"");
                 eprintln!("\r\nsqssh: {msg}");
                 std::process::exit(1);
             }
 
             // Reconnect loop (only reached for "server restarting")
-            {
-                let mut attempt = 0u32;
+            let mut attempt = 0u32;
+            loop {
+                let delay = if attempt == 0 {
+                    Duration::from_millis(500)
+                } else {
+                    Duration::from_secs((1 << (attempt - 1).min(4)) as u64)
+                };
+                tokio::time::sleep(delay).await;
+                attempt += 1;
 
-                loop {
-                    let delay = if attempt == 0 {
-                        Duration::from_millis(500)
-                    } else {
-                        Duration::from_secs((1 << (attempt - 1).min(4)) as u64)
-                    };
-                    tokio::time::sleep(delay).await;
-                    attempt += 1;
-
-                    match reconnect_shell(&mut stdin_rx, cached_key).await {
-                        Ok(code) => std::process::exit(code),
-                        Err(_) => {
-                            eprint!(".");
-                        }
+                match reconnect_raw_shell(&mut stdin_rx, cached_key).await {
+                    Ok(code) => std::process::exit(code),
+                    Err(_) => {
+                        eprint!(".");
                     }
                 }
             }
@@ -445,42 +411,65 @@ enum EscapeState {
     SawTilde,
 }
 
-async fn relay_stdio(
-    channel: &mut Channel,
+async fn relay_raw_stdio(
+    mut data_send: quinn::SendStream,
+    mut data_recv: quinn::RecvStream,
+    mut ctrl_send: quinn::SendStream,
+    mut ctrl_recv: quinn::RecvStream,
     stdin_rx: &mut tokio::sync::mpsc::Receiver<Vec<u8>>,
 ) -> Result<i32, Box<dyn std::error::Error>> {
     let mut exit_code = 0i32;
     let mut escape = EscapeState::AfterNewline;
 
+    // Spawn SIGWINCH handler
+    let (winch_tx, mut winch_rx) = tokio::sync::mpsc::channel::<(u32, u32)>(4);
+    tokio::spawn(async move {
+        let mut sig = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change()).unwrap();
+        loop {
+            sig.recv().await;
+            let (cols, rows) = term_size();
+            if winch_tx.send((cols as u32, rows as u32)).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    // Read buffer for data_recv
+    let mut recv_buf = vec![0u8; 8192];
+
     loop {
         tokio::select! {
             biased;
 
-            msg = channel.recv() => {
-                match msg? {
-                    ChannelMsg::Data { payload } => {
+            // Server → stdout (raw bytes)
+            n = data_recv.read(&mut recv_buf) => {
+                match n {
+                    Ok(Some(n)) => {
                         let mut stdout = tokio::io::stdout();
-                        stdout.write_all(&payload).await?;
+                        stdout.write_all(&recv_buf[..n]).await?;
                         stdout.flush().await?;
                     }
-                    ChannelMsg::ExtendedData { payload, .. } => {
-                        let mut stderr = tokio::io::stderr();
-                        stderr.write_all(&payload).await?;
-                        stderr.flush().await?;
-                    }
-                    ChannelMsg::ExitStatus { code } => {
-                        exit_code = code as i32;
-                    }
-                    ChannelMsg::Eof | ChannelMsg::Close => break,
-                    ChannelMsg::WindowChange { .. } => {}
-                    _ => {}
+                    Ok(None) => break, // stream finished
+                    Err(e) => return Err(format!("connection lost: {e}").into()),
                 }
             }
 
+            // Control messages from server (exit status, etc.)
+            ctrl = ShellControlMsg::decode(&mut ctrl_recv) => {
+                match ctrl {
+                    Ok(ShellControlMsg::ExitStatus { code }) => {
+                        exit_code = code as i32;
+                    }
+                    Ok(ShellControlMsg::Eof) => break,
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+
+            // stdin → server (raw bytes)
             data = stdin_rx.recv() => {
                 match data {
                     Some(payload) => {
-                        // Process escape sequences byte by byte
                         let mut send_buf = Vec::with_capacity(payload.len());
                         let mut should_disconnect = false;
 
@@ -495,7 +484,6 @@ async fn relay_stdio(
                                 EscapeState::AfterNewline => {
                                     if byte == b'~' {
                                         escape = EscapeState::SawTilde;
-                                        // Don't send ~ yet — buffer it
                                     } else {
                                         if byte == b'\r' || byte == b'\n' {
                                             escape = EscapeState::AfterNewline;
@@ -508,12 +496,10 @@ async fn relay_stdio(
                                 EscapeState::SawTilde => {
                                     match byte {
                                         b'.' => {
-                                            // ~. → disconnect
                                             should_disconnect = true;
                                             break;
                                         }
                                         b'?' => {
-                                            // ~? → show help
                                             let help = "\r\nSupported escape sequences:\r\n  ~.  Disconnect\r\n  ~?  Show this help\r\n  ~~  Send literal ~\r\n";
                                             let mut stderr = tokio::io::stderr();
                                             stderr.write_all(help.as_bytes()).await?;
@@ -521,12 +507,10 @@ async fn relay_stdio(
                                             escape = EscapeState::Normal;
                                         }
                                         b'~' => {
-                                            // ~~ → send literal ~
                                             send_buf.push(b'~');
                                             escape = EscapeState::Normal;
                                         }
                                         _ => {
-                                            // Not an escape — send the buffered ~ and this byte
                                             send_buf.push(b'~');
                                             send_buf.push(byte);
                                             if byte == b'\r' || byte == b'\n' {
@@ -542,17 +526,27 @@ async fn relay_stdio(
 
                         if should_disconnect {
                             eprintln!("\r\nConnection to remote closed.");
-                            channel.send(&ChannelMsg::Eof).await.ok();
+                            data_send.finish().ok();
                             break;
                         }
 
                         if !send_buf.is_empty() {
-                            channel.send(&ChannelMsg::Data { payload: send_buf }).await?;
+                            data_send.write_all(&send_buf).await
+                                .map_err(|e| format!("connection lost: {e}"))?;
                         }
                     }
                     None => {
-                        channel.send(&ChannelMsg::Eof).await?;
+                        data_send.finish().ok();
                     }
+                }
+            }
+
+            // Window resize → control stream
+            winch = winch_rx.recv() => {
+                if let Some((cols, rows)) = winch {
+                    let msg = ShellControlMsg::WindowChange { cols, rows };
+                    ctrl_send.write_all(&msg.encode()).await
+                        .map_err(|e| format!("control stream: {e}"))?;
                 }
             }
         }

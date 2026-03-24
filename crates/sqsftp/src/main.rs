@@ -1,14 +1,10 @@
 use std::io::{self, BufRead, Write};
-use std::os::unix::fs::MetadataExt;
+use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use clap::Parser;
 use sqssh_core::client;
-use sqssh_core::protocol::{ChannelMsg, ChannelType, ManifestEntry, TransferDirection};
-use sqssh_core::stream::Channel;
-
-const CHUNK_SIZE: usize = 64 * 1024;
+use sqssh_core::protocol::{ManifestEntry, RawFileHeader, SftpCmd, SftpResp, RAW_SFTP, RAW_CHUNK_SIZE};
 
 #[derive(Parser)]
 #[command(name = "sqsftp", about = "sqssh interactive file transfer")]
@@ -53,28 +49,16 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     )
     .await?;
 
-    let conn = Arc::new(connection.conn);
+    let conn = connection.conn;
 
-    // Open sftp command channel
-    let mut sftp_channel = Channel::open(&conn, ChannelType::Sftp).await?;
-    match sftp_channel.recv().await? {
-        ChannelMsg::ChannelOpenConfirm => {}
-        ChannelMsg::ChannelOpenFailure { description, .. } => {
-            return Err(format!("sftp channel failed: {description}").into());
-        }
-        other => {
-            return Err(format!("unexpected: {other:?}").into());
-        }
-    }
+    // Open raw SFTP bidi stream
+    let (mut sftp_send, mut sftp_recv) = conn.open_bi().await?;
+    sftp_send.write_all(&[RAW_SFTP]).await?;
 
     // Get initial remote cwd
-    sftp_channel
-        .send(&ChannelMsg::SftpRealpath {
-            path: ".".to_string(),
-        })
-        .await?;
-    let mut remote_cwd = match sftp_channel.recv().await? {
-        ChannelMsg::SftpOk { message } => message,
+    sftp_send.write_all(&SftpCmd::Realpath { path: ".".to_string() }.encode()).await?;
+    let mut remote_cwd = match SftpResp::decode(&mut sftp_recv).await? {
+        SftpResp::Ok { message } => message,
         _ => "~".to_string(),
     };
 
@@ -87,7 +71,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
         let mut line = String::new();
         if reader.read_line(&mut line)? == 0 {
-            break; // EOF
+            break;
         }
 
         let line = line.trim();
@@ -161,18 +145,10 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
             "ls" => {
                 let path = if arg1.is_empty() { "." } else { arg1 };
-                sftp_channel
-                    .send(&ChannelMsg::SftpListDir {
-                        path: path.to_string(),
-                    })
-                    .await?;
-                match sftp_channel.recv().await? {
-                    ChannelMsg::SftpDirListing { entries } => {
-                        print_listing(&entries);
-                    }
-                    ChannelMsg::SftpError { message } => {
-                        eprintln!("ls: {message}");
-                    }
+                sftp_send.write_all(&SftpCmd::ListDir { path: path.to_string() }.encode()).await?;
+                match SftpResp::decode(&mut sftp_recv).await? {
+                    SftpResp::DirListing { entries } => print_listing(&entries),
+                    SftpResp::Error { message } => eprintln!("ls: {message}"),
                     other => eprintln!("ls: unexpected response: {other:?}"),
                 }
             }
@@ -181,18 +157,10 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 if arg1.is_empty() {
                     eprintln!("cd: missing path");
                 } else {
-                    sftp_channel
-                        .send(&ChannelMsg::SftpRealpath {
-                            path: arg1.to_string(),
-                        })
-                        .await?;
-                    match sftp_channel.recv().await? {
-                        ChannelMsg::SftpOk { message } => {
-                            remote_cwd = message;
-                        }
-                        ChannelMsg::SftpError { message } => {
-                            eprintln!("cd: {message}");
-                        }
+                    sftp_send.write_all(&SftpCmd::Realpath { path: arg1.to_string() }.encode()).await?;
+                    match SftpResp::decode(&mut sftp_recv).await? {
+                        SftpResp::Ok { message } => remote_cwd = message,
+                        SftpResp::Error { message } => eprintln!("cd: {message}"),
                         other => eprintln!("cd: unexpected: {other:?}"),
                     }
                 }
@@ -202,20 +170,9 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 if arg1.is_empty() {
                     eprintln!("stat: missing path");
                 } else {
-                    sftp_channel
-                        .send(&ChannelMsg::SftpStat {
-                            path: arg1.to_string(),
-                        })
-                        .await?;
-                    match sftp_channel.recv().await? {
-                        ChannelMsg::SftpStatResult {
-                            path,
-                            size,
-                            mode,
-                            mtime,
-                            is_dir,
-                            ..
-                        } => {
+                    sftp_send.write_all(&SftpCmd::Stat { path: arg1.to_string() }.encode()).await?;
+                    match SftpResp::decode(&mut sftp_recv).await? {
+                        SftpResp::StatResult { path, size, mode, mtime, is_dir, .. } => {
                             println!("  Path: {path}");
                             println!("  Type: {}", if is_dir { "directory" } else { "file" });
                             println!("  Size: {}", format_size(size));
@@ -224,9 +181,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                 println!("  Modified: {mtime}");
                             }
                         }
-                        ChannelMsg::SftpError { message } => {
-                            eprintln!("stat: {message}");
-                        }
+                        SftpResp::Error { message } => eprintln!("stat: {message}"),
                         other => eprintln!("stat: unexpected: {other:?}"),
                     }
                 }
@@ -236,15 +191,10 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 if arg1.is_empty() {
                     eprintln!("mkdir: missing path");
                 } else {
-                    sftp_channel
-                        .send(&ChannelMsg::SftpMkdir {
-                            path: arg1.to_string(),
-                            mode: 0o755,
-                        })
-                        .await?;
-                    match sftp_channel.recv().await? {
-                        ChannelMsg::SftpOk { .. } => {}
-                        ChannelMsg::SftpError { message } => eprintln!("mkdir: {message}"),
+                    sftp_send.write_all(&SftpCmd::Mkdir { path: arg1.to_string(), mode: 0o755 }.encode()).await?;
+                    match SftpResp::decode(&mut sftp_recv).await? {
+                        SftpResp::Ok { .. } => {}
+                        SftpResp::Error { message } => eprintln!("mkdir: {message}"),
                         other => eprintln!("mkdir: unexpected: {other:?}"),
                     }
                 }
@@ -254,14 +204,10 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 if arg1.is_empty() {
                     eprintln!("rm: missing path");
                 } else {
-                    sftp_channel
-                        .send(&ChannelMsg::SftpRemove {
-                            path: arg1.to_string(),
-                        })
-                        .await?;
-                    match sftp_channel.recv().await? {
-                        ChannelMsg::SftpOk { .. } => {}
-                        ChannelMsg::SftpError { message } => eprintln!("rm: {message}"),
+                    sftp_send.write_all(&SftpCmd::Remove { path: arg1.to_string() }.encode()).await?;
+                    match SftpResp::decode(&mut sftp_recv).await? {
+                        SftpResp::Ok { .. } => {}
+                        SftpResp::Error { message } => eprintln!("rm: {message}"),
                         other => eprintln!("rm: unexpected: {other:?}"),
                     }
                 }
@@ -271,15 +217,13 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 if arg1.is_empty() || arg2.is_empty() {
                     eprintln!("rename: usage: rename old new");
                 } else {
-                    sftp_channel
-                        .send(&ChannelMsg::SftpRename {
-                            old_path: arg1.to_string(),
-                            new_path: arg2.to_string(),
-                        })
-                        .await?;
-                    match sftp_channel.recv().await? {
-                        ChannelMsg::SftpOk { .. } => {}
-                        ChannelMsg::SftpError { message } => eprintln!("rename: {message}"),
+                    sftp_send.write_all(&SftpCmd::Rename {
+                        old_path: arg1.to_string(),
+                        new_path: arg2.to_string(),
+                    }.encode()).await?;
+                    match SftpResp::decode(&mut sftp_recv).await? {
+                        SftpResp::Ok { .. } => {}
+                        SftpResp::Error { message } => eprintln!("rename: {message}"),
                         other => eprintln!("rename: unexpected: {other:?}"),
                     }
                 }
@@ -303,8 +247,39 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         arg2.to_string()
                     };
 
-                    match do_download(&conn, &remote_file, &local_file).await {
-                        Ok(size) => println!("{local_file} ({size} bytes)"),
+                    // Send get command on SFTP control stream
+                    sftp_send.write_all(&SftpCmd::Get { path: remote_file.clone() }.encode()).await?;
+
+                    // Server sends file on a uni stream
+                    match conn.accept_uni().await {
+                        Ok(mut uni_recv) => {
+                            let mut type_buf = [0u8; 1];
+                            uni_recv.read_exact(&mut type_buf).await?;
+                            let header = RawFileHeader::decode(&mut uni_recv).await?;
+
+                            let mut file = std::fs::File::create(&local_file)?;
+                            let mut written: u64 = 0;
+                            let mut buf = vec![0u8; RAW_CHUNK_SIZE];
+
+                            loop {
+                                match uni_recv.read(&mut buf).await? {
+                                    Some(n) => {
+                                        file.write_all(&buf[..n])?;
+                                        written += n as u64;
+                                    }
+                                    None => break,
+                                }
+                            }
+
+                            file.flush()?;
+                            drop(file);
+                            std::fs::set_permissions(
+                                &local_file,
+                                std::fs::Permissions::from_mode(header.mode),
+                            )?;
+
+                            println!("{local_file} ({written} bytes)");
+                        }
                         Err(e) => eprintln!("get: {e}"),
                     }
                 }
@@ -327,9 +302,42 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         format!("{}/{}", remote_cwd.trim_end_matches('/'), arg2)
                     };
 
-                    match do_upload(&conn, &local_path, &remote_file).await {
-                        Ok(size) => println!("{arg1} ({size} bytes)"),
-                        Err(e) => eprintln!("put: {e}"),
+                    let meta = match std::fs::metadata(&local_path) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            eprintln!("put: {e}");
+                            continue;
+                        }
+                    };
+
+                    // Notify server a put is coming
+                    sftp_send.write_all(&SftpCmd::Put.encode()).await?;
+
+                    // Send file on a uni stream
+                    let mut uni_send = conn.open_uni().await?;
+                    let header = RawFileHeader {
+                        path: remote_file.clone(),
+                        size: meta.len(),
+                        mode: meta.mode(),
+                        mtime: 0,
+                        atime: 0,
+                    };
+                    uni_send.write_all(&header.encode_upload()).await?;
+
+                    let mut file = std::fs::File::open(&local_path)?;
+                    let mut buf = vec![0u8; RAW_CHUNK_SIZE];
+                    loop {
+                        let n = std::io::Read::read(&mut file, &mut buf)?;
+                        if n == 0 { break; }
+                        uni_send.write_all(&buf[..n]).await?;
+                    }
+                    uni_send.finish()?;
+
+                    // Wait for server ack on sftp stream
+                    match SftpResp::decode(&mut sftp_recv).await? {
+                        SftpResp::Ok { .. } => println!("{arg1} ({} bytes)", meta.len()),
+                        SftpResp::Error { message } => eprintln!("put: {message}"),
+                        other => eprintln!("put: unexpected: {other:?}"),
                     }
                 }
             }
@@ -340,145 +348,8 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     }
 
-    sftp_channel.send(&ChannelMsg::Close).await.ok();
+    sftp_send.finish().ok();
     Ok(())
-}
-
-async fn do_download(
-    conn: &quinn::Connection,
-    remote_path: &str,
-    local_path: &str,
-) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
-    let mut channel = Channel::open(
-        conn,
-        ChannelType::FileTransfer {
-            direction: TransferDirection::Download,
-            path: remote_path.to_string(),
-        },
-    )
-    .await?;
-
-    match channel.recv().await? {
-        ChannelMsg::ChannelOpenConfirm => {}
-        ChannelMsg::ChannelOpenFailure { description, .. } => {
-            return Err(description.into());
-        }
-        other => return Err(format!("unexpected: {other:?}").into()),
-    }
-
-    match channel.recv().await? {
-        ChannelMsg::FileResult {
-            success: false,
-            message,
-        } => {
-            return Err(message.into());
-        }
-        ChannelMsg::FileHeader {
-            size, mode, ..
-        } => {
-            use std::io::Write;
-            use std::os::unix::fs::PermissionsExt;
-
-            let mut file = std::fs::File::create(local_path)?;
-            let mut written: u64 = 0;
-
-            loop {
-                match channel.recv().await? {
-                    ChannelMsg::Data { payload } => {
-                        file.write_all(&payload)?;
-                        written += payload.len() as u64;
-                    }
-                    ChannelMsg::Eof => break,
-                    other => return Err(format!("unexpected: {other:?}").into()),
-                }
-            }
-
-            file.flush()?;
-            drop(file);
-            std::fs::set_permissions(local_path, std::fs::Permissions::from_mode(mode))?;
-
-            channel
-                .send(&ChannelMsg::FileResult {
-                    success: true,
-                    message: String::new(),
-                })
-                .await?;
-
-            if written != size {
-                eprintln!("warning: expected {size} bytes, got {written}");
-            }
-
-            Ok(written)
-        }
-        other => Err(format!("unexpected: {other:?}").into()),
-    }
-}
-
-async fn do_upload(
-    conn: &quinn::Connection,
-    local_path: &Path,
-    remote_path: &str,
-) -> Result<u64, Box<dyn std::error::Error + Send + Sync>> {
-    use std::io::Read;
-
-    let meta = std::fs::metadata(local_path)?;
-    let size = meta.len();
-    let mode = meta.mode();
-
-    let mut channel = Channel::open(
-        conn,
-        ChannelType::FileTransfer {
-            direction: TransferDirection::Upload,
-            path: remote_path.to_string(),
-        },
-    )
-    .await?;
-
-    match channel.recv().await? {
-        ChannelMsg::ChannelOpenConfirm => {}
-        ChannelMsg::ChannelOpenFailure { description, .. } => {
-            return Err(description.into());
-        }
-        other => return Err(format!("unexpected: {other:?}").into()),
-    }
-
-    channel
-        .send(&ChannelMsg::FileHeader {
-            path: remote_path.to_string(),
-            size,
-            mode,
-            mtime: 0,
-            atime: 0,
-        })
-        .await?;
-
-    let mut file = std::fs::File::open(local_path)?;
-    let mut buf = vec![0u8; CHUNK_SIZE];
-
-    loop {
-        let n = file.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        channel
-            .send(&ChannelMsg::Data {
-                payload: buf[..n].to_vec(),
-            })
-            .await?;
-    }
-
-    channel.send(&ChannelMsg::Eof).await?;
-
-    match channel.recv().await? {
-        ChannelMsg::FileResult { success, message } => {
-            if !success {
-                return Err(format!("upload failed: {message}").into());
-            }
-        }
-        other => return Err(format!("unexpected: {other:?}").into()),
-    }
-
-    Ok(size)
 }
 
 fn print_listing(entries: &[ManifestEntry]) {

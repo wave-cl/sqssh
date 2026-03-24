@@ -124,6 +124,58 @@ async fn write_file_from_stream(
     Ok(())
 }
 
+/// Receive a raw file from a uni stream and write to disk.
+/// Used by SFTP put handler.
+pub async fn receive_raw_file(
+    recv: &mut quinn::RecvStream,
+    path: &Path,
+    size: u64,
+    mode: u32,
+    mtime: u64,
+    atime: u64,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    use std::io::Write;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).ok();
+    }
+
+    let mut file = std::fs::File::create(path)?;
+    let mut written: u64 = 0;
+    let mut buf = vec![0u8; RAW_CHUNK_SIZE];
+
+    loop {
+        match recv.read(&mut buf).await {
+            Ok(Some(n)) => {
+                file.write_all(&buf[..n])?;
+                written += n as u64;
+            }
+            Ok(None) => break,
+            Err(e) => return Err(format!("read error: {e}").into()),
+        }
+    }
+
+    file.flush()?;
+    drop(file);
+
+    if written != size {
+        tracing::warn!("size mismatch for {}: expected {size}, got {written}", path.display());
+    }
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
+
+    if mtime > 0 {
+        let c_path = std::ffi::CString::new(path.to_string_lossy().as_bytes())?;
+        let times = [
+            libc::timeval { tv_sec: atime as libc::time_t, tv_usec: 0 },
+            libc::timeval { tv_sec: mtime as libc::time_t, tv_usec: 0 },
+        ];
+        unsafe { libc::utimes(c_path.as_ptr(), times.as_ptr()); }
+    }
+
+    Ok(())
+}
+
 /// Handle a metadata bidi stream for download requests and manifests.
 pub async fn handle_metadata_stream(
     conn: &quinn::Connection,

@@ -29,6 +29,12 @@ enum AcceptResult {
     Bidi(Channel, ChannelType),
     /// Unidirectional stream (raw file upload).
     Uni(quinn::RecvStream),
+    /// Raw shell data stream.
+    RawShell(quinn::SendStream, quinn::RecvStream, protocol::RawShellHeader),
+    /// Raw shell control stream.
+    ShellControl(quinn::SendStream, quinn::RecvStream),
+    /// Raw SFTP session.
+    RawSftp(quinn::SendStream, quinn::RecvStream),
 }
 
 #[derive(Parser)]
@@ -814,9 +820,72 @@ async fn handle_connection(
     // Handle channel requests (bidi) and raw file transfers (uni)
     loop {
         let accept_result = tokio::select! {
-            bidi = Channel::accept(&conn) => {
+            bidi = conn.accept_bi() => {
                 match bidi {
-                    Ok((channel, channel_type)) => AcceptResult::Bidi(channel, channel_type),
+                    Ok((send, mut recv)) => {
+                        // Peek at the first bytes to determine stream type.
+                        // Raw shell streams start with RAW_SHELL (0xB0) or SHELL_CONTROL (0xB1).
+                        // Framed channel streams start with a 4-byte length prefix.
+                        let mut peek = [0u8; 1];
+                        match recv.read_exact(&mut peek).await {
+                            Ok(()) => {
+                                match peek[0] {
+                                    protocol::RAW_SHELL => {
+                                        match protocol::RawShellHeader::decode(&mut recv).await {
+                                            Ok(header) => AcceptResult::RawShell(send, recv, header),
+                                            Err(e) => {
+                                                tracing::error!("raw shell header: {e}");
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                    protocol::SHELL_CONTROL => {
+                                        AcceptResult::ShellControl(send, recv)
+                                    }
+                                    protocol::RAW_SFTP => {
+                                        AcceptResult::RawSftp(send, recv)
+                                    }
+                                    _ => {
+                                        // It's a framed channel — the byte we read is the first
+                                        // byte of the 4-byte length prefix. Read the remaining 3
+                                        // bytes, then the full frame.
+                                        let mut rest = [0u8; 3];
+                                        if let Err(e) = recv.read_exact(&mut rest).await {
+                                            tracing::error!("channel frame: {e}");
+                                            continue;
+                                        }
+                                        let len = u32::from_be_bytes([peek[0], rest[0], rest[1], rest[2]]);
+                                        if len == 0 || len > protocol::MAX_MESSAGE_SIZE {
+                                            tracing::error!("invalid frame length: {len}");
+                                            continue;
+                                        }
+                                        let mut data = vec![0u8; len as usize];
+                                        if let Err(e) = recv.read_exact(&mut data).await {
+                                            tracing::error!("channel frame data: {e}");
+                                            continue;
+                                        }
+                                        let msg_type = data[0];
+                                        let payload = &data[1..];
+                                        match protocol::ChannelMsg::decode(msg_type, payload) {
+                                            Ok(protocol::ChannelMsg::ChannelOpen { channel_type }) => {
+                                                let channel = Channel { send, recv };
+                                                AcceptResult::Bidi(channel, channel_type)
+                                            }
+                                            Ok(other) => {
+                                                tracing::error!("expected ChannelOpen, got {other:?}");
+                                                continue;
+                                            }
+                                            Err(e) => {
+                                                tracing::error!("channel decode: {e}");
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
                     Err(_) => break,
                 }
             }
@@ -855,6 +924,99 @@ async fn handle_connection(
                 }.in_current_span());
                 continue;
             }
+            AcceptResult::RawShell(data_send, data_recv, header) => {
+                // Raw shell session — wait for the control stream to arrive
+                // Store the pending raw shell and pick it up when ShellControl arrives
+                use std::sync::atomic::Ordering::Relaxed;
+                let current = state.active_sessions.fetch_add(1, Relaxed);
+                if current >= state.max_sessions {
+                    state.active_sessions.fetch_sub(1, Relaxed);
+                    tracing::warn!("max sessions ({}) reached, rejecting raw shell", state.max_sessions);
+                    continue;
+                }
+
+                // We need the control stream — it should be the next bidi stream.
+                // For now, accept it inline (client opens data then control immediately).
+                let ctrl_result = conn.accept_bi().await;
+                let (ctrl_send, mut ctrl_recv) = match ctrl_result {
+                    Ok(pair) => pair,
+                    Err(_) => {
+                        state.active_sessions.fetch_sub(1, Relaxed);
+                        break;
+                    }
+                };
+                // Read and verify the SHELL_CONTROL type byte
+                let mut ctrl_type = [0u8; 1];
+                if let Err(e) = ctrl_recv.read_exact(&mut ctrl_type).await {
+                    tracing::error!("shell control type: {e}");
+                    state.active_sessions.fetch_sub(1, Relaxed);
+                    continue;
+                }
+                if ctrl_type[0] != protocol::SHELL_CONTROL {
+                    tracing::error!("expected SHELL_CONTROL, got {:#x}", ctrl_type[0]);
+                    state.active_sessions.fetch_sub(1, Relaxed);
+                    continue;
+                }
+
+                let user = username.clone();
+                let remote_host = remote.ip().to_string();
+                let print_motd = state.print_motd;
+                let print_last_log = state.print_last_log;
+                let banner = banner_content.clone();
+                let state_ref = state.clone();
+                let client_pk = pubkey_bytes;
+                let resumed_fd = pending_session.take().map(|(fd, info)| {
+                    tracing::info!(
+                        user = %info.username,
+                        pid = info.child_pid,
+                        "resuming persisted session (raw)"
+                    );
+                    (fd, info)
+                });
+                tokio::spawn(
+                    async move {
+                        if let Some((fd, info)) = resumed_fd {
+                            if let Err(e) = pty_handler::resume_raw_shell(
+                                data_send, data_recv, ctrl_send, ctrl_recv,
+                                fd, info.child_pid,
+                                header.cols as u16, header.rows as u16,
+                            ).await {
+                                tracing::error!("raw resume error: {e}");
+                            }
+                        } else if let Err(e) = handle_raw_session_with_persist(
+                            data_send, data_recv, ctrl_send, ctrl_recv,
+                            &header, &user, &remote_host,
+                            print_motd, print_last_log, banner,
+                            &state_ref, client_pk,
+                        ).await {
+                            tracing::error!("raw session error: {e}");
+                        }
+                        state_ref.active_sessions.fetch_sub(1, Relaxed);
+                    }
+                    .in_current_span(),
+                );
+                continue;
+            }
+            AcceptResult::ShellControl(_, _) => {
+                // Shell control without preceding raw shell — ignore
+                tracing::warn!("received ShellControl without RawShell");
+                continue;
+            }
+            AcceptResult::RawSftp(mut sftp_send, mut sftp_recv) => {
+                let user = username.clone();
+                let conn_for_sftp = conn.clone();
+                tokio::spawn(
+                    async move {
+                        if let Err(e) = sftp_handler::handle_sftp(
+                            &mut sftp_send, &mut sftp_recv, &conn_for_sftp, &user,
+                        ).await {
+                            tracing::error!("raw sftp error: {e}");
+                        }
+                    }
+                    .in_current_span(),
+                );
+                continue;
+            }
             AcceptResult::Bidi(_, _) => {}
         }
 
@@ -865,7 +1027,7 @@ async fn handle_connection(
 
         match channel_type {
             ChannelType::Session => {
-                // Enforce MaxSessions
+                // Legacy framed session (used by sqssh-copy-id exec)
                 use std::sync::atomic::Ordering::Relaxed;
                 let current = state.active_sessions.fetch_add(1, Relaxed);
                 if current >= state.max_sessions {
@@ -950,16 +1112,8 @@ async fn handle_connection(
                 );
             }
             ChannelType::Sftp => {
-                channel.confirm().await?;
-                let user = username.clone();
-                tokio::spawn(
-                    async move {
-                        if let Err(e) = sftp_handler::handle_sftp(&mut channel, &user).await {
-                            tracing::error!("sftp error: {e}");
-                        }
-                    }
-                    .in_current_span(),
-                );
+                // Legacy framed SFTP — no longer supported, use RAW_SFTP
+                channel.reject(1, "use raw sftp stream").await?;
             }
             other => {
                 tracing::warn!("unsupported channel type: {other:?}");
@@ -1104,6 +1258,65 @@ async fn handle_session_with_persist(
                 pid = spawned.child_pid,
                 fd = spawned.master_raw_fd,
                 "registered PTY session for persistence"
+            );
+            let _ = spawn_tx.send(ActivePtySession {
+                info,
+                master_fd: spawned.master_raw_fd,
+            });
+        },
+    ).await
+}
+
+async fn handle_raw_session_with_persist(
+    data_send: quinn::SendStream,
+    data_recv: quinn::RecvStream,
+    ctrl_send: quinn::SendStream,
+    ctrl_recv: quinn::RecvStream,
+    header: &protocol::RawShellHeader,
+    username: &str,
+    remote_host: &str,
+    print_motd: bool,
+    print_last_log: bool,
+    banner: Option<String>,
+    state: &Arc<ServerState>,
+    client_pubkey: [u8; 32],
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let user = username.to_string();
+    let term = header.term.clone();
+    let cols = header.cols as u16;
+    let rows = header.rows as u16;
+    let session_id = state.next_session_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+    let (spawn_tx, spawn_rx) = tokio::sync::oneshot::channel::<ActivePtySession>();
+
+    let state_for_reg = state.clone();
+    tokio::spawn(async move {
+        if let Ok(session) = spawn_rx.await {
+            state_for_reg.pty_sessions.lock().await.insert(session_id, session);
+        }
+    });
+
+    let term_clone = term.clone();
+    pty_handler::run_raw_shell(
+        data_send, data_recv, ctrl_send, ctrl_recv,
+        username, remote_host, &term, cols, rows, print_motd, print_last_log,
+        banner,
+        move |spawned| {
+            let info = PersistedSession {
+                username: user.clone(),
+                client_pubkey,
+                term: term_clone.clone(),
+                cols,
+                rows,
+                child_pid: spawned.child_pid,
+                home: spawned.home.clone(),
+                shell: spawned.shell.clone(),
+            };
+            tracing::info!(
+                session_id,
+                pid = spawned.child_pid,
+                fd = spawned.master_raw_fd,
+                "registered raw PTY session for persistence"
             );
             let _ = spawn_tx.send(ActivePtySession {
                 info,

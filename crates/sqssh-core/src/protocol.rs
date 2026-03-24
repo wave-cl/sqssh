@@ -41,16 +41,7 @@ const MSG_EXIT_SIGNAL: u8 = 0x63;
 const MSG_FILE_HEADER: u8 = 0x80;
 const MSG_FILE_RESULT: u8 = 0x81;
 const MSG_FILE_MANIFEST: u8 = 0x82;
-const MSG_SFTP_LIST_DIR: u8 = 0x90;
-const MSG_SFTP_STAT: u8 = 0x91;
-const MSG_SFTP_MKDIR: u8 = 0x92;
-const MSG_SFTP_REMOVE: u8 = 0x93;
-const MSG_SFTP_RENAME: u8 = 0x94;
-const MSG_SFTP_REALPATH: u8 = 0x95;
-const MSG_SFTP_DIR_LISTING: u8 = 0x96;
-const MSG_SFTP_STAT_RESULT: u8 = 0x97;
-const MSG_SFTP_OK: u8 = 0x98;
-const MSG_SFTP_ERROR: u8 = 0x99;
+// MSG_SFTP_* constants removed — SFTP uses raw stream protocol now.
 const MSG_EOF: u8 = 0x70;
 const MSG_CLOSE: u8 = 0x71;
 
@@ -187,44 +178,7 @@ pub enum ChannelMsg {
     FileManifest {
         entries: Vec<ManifestEntry>,
     },
-    // -- SFTP interactive commands --
-    SftpListDir {
-        path: String,
-    },
-    SftpStat {
-        path: String,
-    },
-    SftpMkdir {
-        path: String,
-        mode: u32,
-    },
-    SftpRemove {
-        path: String,
-    },
-    SftpRename {
-        old_path: String,
-        new_path: String,
-    },
-    SftpRealpath {
-        path: String,
-    },
-    SftpDirListing {
-        entries: Vec<ManifestEntry>,
-    },
-    SftpStatResult {
-        path: String,
-        size: u64,
-        mode: u32,
-        mtime: u64,
-        atime: u64,
-        is_dir: bool,
-    },
-    SftpOk {
-        message: String,
-    },
-    SftpError {
-        message: String,
-    },
+    // SFTP commands moved to raw stream protocol (SftpCmd/SftpResp).
     Eof,
     Close,
 }
@@ -305,16 +259,6 @@ impl ChannelMsg {
             Self::FileHeader { .. } => MSG_FILE_HEADER,
             Self::FileResult { .. } => MSG_FILE_RESULT,
             Self::FileManifest { .. } => MSG_FILE_MANIFEST,
-            Self::SftpListDir { .. } => MSG_SFTP_LIST_DIR,
-            Self::SftpStat { .. } => MSG_SFTP_STAT,
-            Self::SftpMkdir { .. } => MSG_SFTP_MKDIR,
-            Self::SftpRemove { .. } => MSG_SFTP_REMOVE,
-            Self::SftpRename { .. } => MSG_SFTP_RENAME,
-            Self::SftpRealpath { .. } => MSG_SFTP_REALPATH,
-            Self::SftpDirListing { .. } => MSG_SFTP_DIR_LISTING,
-            Self::SftpStatResult { .. } => MSG_SFTP_STAT_RESULT,
-            Self::SftpOk { .. } => MSG_SFTP_OK,
-            Self::SftpError { .. } => MSG_SFTP_ERROR,
             Self::Eof => MSG_EOF,
             Self::Close => MSG_CLOSE,
         }
@@ -486,6 +430,130 @@ pub const RAW_DOWNLOAD_CHUNK: u8 = 0xA7;
 
 /// Chunk size for raw file transfers (256 KB).
 pub const RAW_CHUNK_SIZE: usize = 256 * 1024;
+
+// -- Raw shell protocol (bidi streams, no msgpack) --
+
+/// Stream type byte: raw shell data (bidi stream).
+pub const RAW_SHELL: u8 = 0xB0;
+/// Stream type byte: shell control messages (bidi stream).
+pub const SHELL_CONTROL: u8 = 0xB1;
+
+// Shell control message types
+const SHELL_CTRL_WINDOW_CHANGE: u8 = 0x01;
+const SHELL_CTRL_EXIT_STATUS: u8 = 0x02;
+const SHELL_CTRL_EOF: u8 = 0x03;
+
+/// Header sent at the start of a RAW_SHELL bidi stream.
+/// [1 byte: RAW_SHELL][2 bytes: term_len][term][4 bytes: cols][4 bytes: rows]
+#[derive(Debug, Clone)]
+pub struct RawShellHeader {
+    pub term: String,
+    pub cols: u32,
+    pub rows: u32,
+}
+
+impl RawShellHeader {
+    pub fn encode(&self) -> Vec<u8> {
+        let term_bytes = self.term.as_bytes();
+        let mut buf = Vec::with_capacity(1 + 2 + term_bytes.len() + 8);
+        buf.push(RAW_SHELL);
+        buf.extend_from_slice(&(term_bytes.len() as u16).to_be_bytes());
+        buf.extend_from_slice(term_bytes);
+        buf.extend_from_slice(&self.cols.to_be_bytes());
+        buf.extend_from_slice(&self.rows.to_be_bytes());
+        buf
+    }
+
+    pub async fn decode(recv: &mut quinn::RecvStream) -> Result<Self> {
+        let mut term_len_buf = [0u8; 2];
+        recv.read_exact(&mut term_len_buf).await
+            .map_err(|e| Error::Connection(format!("shell header term len: {e}")))?;
+        let term_len = u16::from_be_bytes(term_len_buf) as usize;
+        if term_len > 256 {
+            return Err(Error::Protocol("term string too long".into()));
+        }
+        let mut term_buf = vec![0u8; term_len];
+        recv.read_exact(&mut term_buf).await
+            .map_err(|e| Error::Connection(format!("shell header term: {e}")))?;
+        let term = String::from_utf8(term_buf)
+            .map_err(|_| Error::Protocol("invalid UTF-8 in term".into()))?;
+        let mut dims = [0u8; 8];
+        recv.read_exact(&mut dims).await
+            .map_err(|e| Error::Connection(format!("shell header dims: {e}")))?;
+        Ok(Self {
+            term,
+            cols: u32::from_be_bytes(dims[0..4].try_into().unwrap()),
+            rows: u32::from_be_bytes(dims[4..8].try_into().unwrap()),
+        })
+    }
+}
+
+/// Control messages sent on the SHELL_CONTROL bidi stream.
+#[derive(Debug, Clone)]
+pub enum ShellControlMsg {
+    WindowChange { cols: u32, rows: u32 },
+    ExitStatus { code: u32 },
+    Eof,
+}
+
+impl ShellControlMsg {
+    pub fn encode(&self) -> Vec<u8> {
+        match self {
+            Self::WindowChange { cols, rows } => {
+                let mut buf = Vec::with_capacity(9);
+                buf.push(SHELL_CTRL_WINDOW_CHANGE);
+                buf.extend_from_slice(&cols.to_be_bytes());
+                buf.extend_from_slice(&rows.to_be_bytes());
+                buf
+            }
+            Self::ExitStatus { code } => {
+                let mut buf = Vec::with_capacity(5);
+                buf.push(SHELL_CTRL_EXIT_STATUS);
+                buf.extend_from_slice(&code.to_be_bytes());
+                buf
+            }
+            Self::Eof => vec![SHELL_CTRL_EOF],
+        }
+    }
+
+    pub async fn decode(recv: &mut quinn::RecvStream) -> Result<Self> {
+        let mut type_buf = [0u8; 1];
+        recv.read_exact(&mut type_buf).await
+            .map_err(|e| Error::Connection(format!("shell control type: {e}")))?;
+        match type_buf[0] {
+            SHELL_CTRL_WINDOW_CHANGE => {
+                let mut dims = [0u8; 8];
+                recv.read_exact(&mut dims).await
+                    .map_err(|e| Error::Connection(format!("shell control winchange: {e}")))?;
+                Ok(Self::WindowChange {
+                    cols: u32::from_be_bytes(dims[0..4].try_into().unwrap()),
+                    rows: u32::from_be_bytes(dims[4..8].try_into().unwrap()),
+                })
+            }
+            SHELL_CTRL_EXIT_STATUS => {
+                let mut code_buf = [0u8; 4];
+                recv.read_exact(&mut code_buf).await
+                    .map_err(|e| Error::Connection(format!("shell control exit: {e}")))?;
+                Ok(Self::ExitStatus {
+                    code: u32::from_be_bytes(code_buf),
+                })
+            }
+            SHELL_CTRL_EOF => Ok(Self::Eof),
+            other => Err(Error::Protocol(format!("unknown shell control type: {other:#x}"))),
+        }
+    }
+}
+
+/// Header sent at the start of a SHELL_CONTROL bidi stream.
+/// [1 byte: SHELL_CONTROL]
+/// No additional data — the type byte is sufficient.
+pub struct ShellControlHeader;
+
+impl ShellControlHeader {
+    pub fn encode() -> Vec<u8> {
+        vec![SHELL_CONTROL]
+    }
+}
 
 /// Raw file header written at the start of a uni stream.
 #[derive(Debug, Clone)]
@@ -756,6 +824,296 @@ pub async fn decode_transfer_result(recv: &mut quinn::RecvStream) -> Result<(boo
         String::new()
     };
     Ok((success, message))
+}
+
+// -- Raw SFTP protocol (bidi stream, no msgpack) --
+
+/// Stream type byte: raw SFTP session.
+pub const RAW_SFTP: u8 = 0xC0;
+
+// SFTP command types
+const SFTP_CMD_LIST_DIR: u8 = 0x01;
+const SFTP_CMD_STAT: u8 = 0x02;
+const SFTP_CMD_MKDIR: u8 = 0x03;
+const SFTP_CMD_REMOVE: u8 = 0x04;
+const SFTP_CMD_RENAME: u8 = 0x05;
+const SFTP_CMD_REALPATH: u8 = 0x06;
+const SFTP_CMD_GET: u8 = 0x07;
+const SFTP_CMD_PUT: u8 = 0x08;
+
+// SFTP response types
+const SFTP_RESP_OK: u8 = 0x10;
+const SFTP_RESP_ERROR: u8 = 0x11;
+const SFTP_RESP_DIR_LISTING: u8 = 0x12;
+const SFTP_RESP_STAT_RESULT: u8 = 0x13;
+
+/// SFTP command sent by client.
+#[derive(Debug, Clone)]
+pub enum SftpCmd {
+    ListDir { path: String },
+    Stat { path: String },
+    Mkdir { path: String, mode: u32 },
+    Remove { path: String },
+    Rename { old_path: String, new_path: String },
+    Realpath { path: String },
+    Get { path: String },
+    Put, // file data arrives on a uni stream
+}
+
+impl SftpCmd {
+    pub fn encode(&self) -> Vec<u8> {
+        match self {
+            Self::ListDir { path } | Self::Stat { path } | Self::Realpath { path }
+            | Self::Remove { path } | Self::Get { path } => {
+                let cmd = match self {
+                    Self::ListDir { .. } => SFTP_CMD_LIST_DIR,
+                    Self::Stat { .. } => SFTP_CMD_STAT,
+                    Self::Realpath { .. } => SFTP_CMD_REALPATH,
+                    Self::Remove { .. } => SFTP_CMD_REMOVE,
+                    Self::Get { .. } => SFTP_CMD_GET,
+                    _ => unreachable!(),
+                };
+                let pb = path.as_bytes();
+                let mut buf = Vec::with_capacity(3 + pb.len());
+                buf.push(cmd);
+                buf.extend_from_slice(&(pb.len() as u16).to_be_bytes());
+                buf.extend_from_slice(pb);
+                buf
+            }
+            Self::Mkdir { path, mode } => {
+                let pb = path.as_bytes();
+                let payload_len = 2 + pb.len() + 4;
+                let mut buf = Vec::with_capacity(3 + payload_len);
+                buf.push(SFTP_CMD_MKDIR);
+                buf.extend_from_slice(&(payload_len as u16).to_be_bytes());
+                buf.extend_from_slice(&(pb.len() as u16).to_be_bytes());
+                buf.extend_from_slice(pb);
+                buf.extend_from_slice(&mode.to_be_bytes());
+                buf
+            }
+            Self::Rename { old_path, new_path } => {
+                let ob = old_path.as_bytes();
+                let nb = new_path.as_bytes();
+                let payload_len = 2 + ob.len() + 2 + nb.len();
+                let mut buf = Vec::with_capacity(3 + payload_len);
+                buf.push(SFTP_CMD_RENAME);
+                buf.extend_from_slice(&(payload_len as u16).to_be_bytes());
+                buf.extend_from_slice(&(ob.len() as u16).to_be_bytes());
+                buf.extend_from_slice(ob);
+                buf.extend_from_slice(&(nb.len() as u16).to_be_bytes());
+                buf.extend_from_slice(nb);
+                buf
+            }
+            Self::Put => {
+                vec![SFTP_CMD_PUT, 0, 0]
+            }
+        }
+    }
+
+    pub async fn decode(recv: &mut quinn::RecvStream) -> Result<Self> {
+        let mut header = [0u8; 3];
+        recv.read_exact(&mut header).await
+            .map_err(|e| Error::Connection(format!("sftp cmd header: {e}")))?;
+        let cmd_type = header[0];
+        let payload_len = u16::from_be_bytes([header[1], header[2]]) as usize;
+
+        if payload_len > 8192 {
+            return Err(Error::Protocol("sftp payload too large".into()));
+        }
+
+        let mut payload = vec![0u8; payload_len];
+        if payload_len > 0 {
+            recv.read_exact(&mut payload).await
+                .map_err(|e| Error::Connection(format!("sftp cmd payload: {e}")))?;
+        }
+
+        match cmd_type {
+            SFTP_CMD_LIST_DIR => Ok(Self::ListDir {
+                path: String::from_utf8(payload).map_err(|_| Error::Protocol("invalid UTF-8".into()))?,
+            }),
+            SFTP_CMD_STAT => Ok(Self::Stat {
+                path: String::from_utf8(payload).map_err(|_| Error::Protocol("invalid UTF-8".into()))?,
+            }),
+            SFTP_CMD_REALPATH => Ok(Self::Realpath {
+                path: String::from_utf8(payload).map_err(|_| Error::Protocol("invalid UTF-8".into()))?,
+            }),
+            SFTP_CMD_REMOVE => Ok(Self::Remove {
+                path: String::from_utf8(payload).map_err(|_| Error::Protocol("invalid UTF-8".into()))?,
+            }),
+            SFTP_CMD_GET => Ok(Self::Get {
+                path: String::from_utf8(payload).map_err(|_| Error::Protocol("invalid UTF-8".into()))?,
+            }),
+            SFTP_CMD_PUT => Ok(Self::Put),
+            SFTP_CMD_MKDIR => {
+                if payload.len() < 6 {
+                    return Err(Error::Protocol("mkdir payload too short".into()));
+                }
+                let path_len = u16::from_be_bytes([payload[0], payload[1]]) as usize;
+                if payload.len() < 2 + path_len + 4 {
+                    return Err(Error::Protocol("mkdir payload truncated".into()));
+                }
+                let path = String::from_utf8(payload[2..2 + path_len].to_vec())
+                    .map_err(|_| Error::Protocol("invalid UTF-8".into()))?;
+                let mode = u32::from_be_bytes(payload[2 + path_len..2 + path_len + 4].try_into().unwrap());
+                Ok(Self::Mkdir { path, mode })
+            }
+            SFTP_CMD_RENAME => {
+                if payload.len() < 4 {
+                    return Err(Error::Protocol("rename payload too short".into()));
+                }
+                let old_len = u16::from_be_bytes([payload[0], payload[1]]) as usize;
+                if payload.len() < 2 + old_len + 2 {
+                    return Err(Error::Protocol("rename payload truncated".into()));
+                }
+                let old_path = String::from_utf8(payload[2..2 + old_len].to_vec())
+                    .map_err(|_| Error::Protocol("invalid UTF-8".into()))?;
+                let off = 2 + old_len;
+                let new_len = u16::from_be_bytes([payload[off], payload[off + 1]]) as usize;
+                if payload.len() < off + 2 + new_len {
+                    return Err(Error::Protocol("rename payload truncated".into()));
+                }
+                let new_path = String::from_utf8(payload[off + 2..off + 2 + new_len].to_vec())
+                    .map_err(|_| Error::Protocol("invalid UTF-8".into()))?;
+                Ok(Self::Rename { old_path, new_path })
+            }
+            other => Err(Error::Protocol(format!("unknown sftp cmd: {other:#x}"))),
+        }
+    }
+}
+
+/// SFTP response sent by server.
+#[derive(Debug, Clone)]
+pub enum SftpResp {
+    Ok { message: String },
+    Error { message: String },
+    DirListing { entries: Vec<ManifestEntry> },
+    StatResult {
+        path: String,
+        size: u64,
+        mode: u32,
+        mtime: u64,
+        atime: u64,
+        is_dir: bool,
+    },
+}
+
+impl SftpResp {
+    pub fn encode(&self) -> Vec<u8> {
+        match self {
+            Self::Ok { message } | Self::Error { message } => {
+                let typ = if matches!(self, Self::Ok { .. }) { SFTP_RESP_OK } else { SFTP_RESP_ERROR };
+                let mb = message.as_bytes();
+                let mut buf = Vec::with_capacity(3 + mb.len());
+                buf.push(typ);
+                buf.extend_from_slice(&(mb.len() as u16).to_be_bytes());
+                buf.extend_from_slice(mb);
+                buf
+            }
+            Self::DirListing { entries } => {
+                let mut buf = Vec::new();
+                buf.push(SFTP_RESP_DIR_LISTING);
+                buf.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+                for entry in entries {
+                    let pb = entry.path.as_bytes();
+                    buf.push(if entry.is_dir { 1 } else { 0 });
+                    buf.extend_from_slice(&(pb.len() as u16).to_be_bytes());
+                    buf.extend_from_slice(pb);
+                    buf.extend_from_slice(&entry.size.to_be_bytes());
+                    buf.extend_from_slice(&entry.mode.to_be_bytes());
+                    buf.extend_from_slice(&entry.mtime.to_be_bytes());
+                    buf.extend_from_slice(&entry.atime.to_be_bytes());
+                }
+                buf
+            }
+            Self::StatResult { path, size, mode, mtime, atime, is_dir } => {
+                let pb = path.as_bytes();
+                let mut buf = Vec::with_capacity(1 + 2 + pb.len() + 29);
+                buf.push(SFTP_RESP_STAT_RESULT);
+                buf.extend_from_slice(&(pb.len() as u16).to_be_bytes());
+                buf.extend_from_slice(pb);
+                buf.extend_from_slice(&size.to_be_bytes());
+                buf.extend_from_slice(&mode.to_be_bytes());
+                buf.extend_from_slice(&mtime.to_be_bytes());
+                buf.extend_from_slice(&atime.to_be_bytes());
+                buf.push(if *is_dir { 1 } else { 0 });
+                buf
+            }
+        }
+    }
+
+    pub async fn decode(recv: &mut quinn::RecvStream) -> Result<Self> {
+        let mut type_buf = [0u8; 1];
+        recv.read_exact(&mut type_buf).await
+            .map_err(|e| Error::Connection(format!("sftp resp type: {e}")))?;
+
+        match type_buf[0] {
+            SFTP_RESP_OK | SFTP_RESP_ERROR => {
+                let mut len_buf = [0u8; 2];
+                recv.read_exact(&mut len_buf).await
+                    .map_err(|e| Error::Connection(format!("sftp resp len: {e}")))?;
+                let len = u16::from_be_bytes(len_buf) as usize;
+                let mut msg_buf = vec![0u8; len];
+                if len > 0 {
+                    recv.read_exact(&mut msg_buf).await
+                        .map_err(|e| Error::Connection(format!("sftp resp msg: {e}")))?;
+                }
+                let message = String::from_utf8(msg_buf).unwrap_or_default();
+                if type_buf[0] == SFTP_RESP_OK {
+                    Ok(Self::Ok { message })
+                } else {
+                    Ok(Self::Error { message })
+                }
+            }
+            SFTP_RESP_DIR_LISTING => {
+                let mut count_buf = [0u8; 4];
+                recv.read_exact(&mut count_buf).await
+                    .map_err(|e| Error::Connection(format!("sftp dir count: {e}")))?;
+                let count = u32::from_be_bytes(count_buf) as usize;
+                let mut entries = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let mut flags = [0u8; 1];
+                    recv.read_exact(&mut flags).await.map_err(|e| Error::Connection(format!("dir entry: {e}")))?;
+                    let is_dir = flags[0] == 1;
+                    let mut pl = [0u8; 2];
+                    recv.read_exact(&mut pl).await.map_err(|e| Error::Connection(format!("dir path len: {e}")))?;
+                    let path_len = u16::from_be_bytes(pl) as usize;
+                    let mut pb = vec![0u8; path_len];
+                    recv.read_exact(&mut pb).await.map_err(|e| Error::Connection(format!("dir path: {e}")))?;
+                    let path = String::from_utf8(pb).map_err(|_| Error::Protocol("invalid UTF-8".into()))?;
+                    let mut meta = [0u8; 28];
+                    recv.read_exact(&mut meta).await.map_err(|e| Error::Connection(format!("dir meta: {e}")))?;
+                    entries.push(ManifestEntry {
+                        path,
+                        size: u64::from_be_bytes(meta[0..8].try_into().unwrap()),
+                        mode: u32::from_be_bytes(meta[8..12].try_into().unwrap()),
+                        is_dir,
+                        mtime: u64::from_be_bytes(meta[12..20].try_into().unwrap()),
+                        atime: u64::from_be_bytes(meta[20..28].try_into().unwrap()),
+                    });
+                }
+                Ok(Self::DirListing { entries })
+            }
+            SFTP_RESP_STAT_RESULT => {
+                let mut pl = [0u8; 2];
+                recv.read_exact(&mut pl).await.map_err(|e| Error::Connection(format!("stat path len: {e}")))?;
+                let path_len = u16::from_be_bytes(pl) as usize;
+                let mut pb = vec![0u8; path_len];
+                recv.read_exact(&mut pb).await.map_err(|e| Error::Connection(format!("stat path: {e}")))?;
+                let path = String::from_utf8(pb).map_err(|_| Error::Protocol("invalid UTF-8".into()))?;
+                let mut meta = [0u8; 29];
+                recv.read_exact(&mut meta).await.map_err(|e| Error::Connection(format!("stat meta: {e}")))?;
+                Ok(Self::StatResult {
+                    path,
+                    size: u64::from_be_bytes(meta[0..8].try_into().unwrap()),
+                    mode: u32::from_be_bytes(meta[8..12].try_into().unwrap()),
+                    mtime: u64::from_be_bytes(meta[12..20].try_into().unwrap()),
+                    atime: u64::from_be_bytes(meta[20..28].try_into().unwrap()),
+                    is_dir: meta[28] == 1,
+                })
+            }
+            other => Err(Error::Protocol(format!("unknown sftp resp: {other:#x}"))),
+        }
+    }
 }
 
 // -- Agent protocol (Unix domain socket, sqssh-agent) --

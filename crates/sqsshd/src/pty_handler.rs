@@ -5,8 +5,9 @@ use std::process::Stdio;
 
 use nix::pty::openpty;
 use nix::unistd;
-use sqssh_core::protocol::ChannelMsg;
+use sqssh_core::protocol::{ChannelMsg, ShellControlMsg};
 use sqssh_core::stream::Channel;
+use tokio::io::AsyncWriteExt;
 use tokio::io::unix::AsyncFd;
 
 /// Look up a system user by name. Returns (uid, gid, home, shell).
@@ -501,6 +502,283 @@ pub async fn resume_shell(
     let _ = channel.send(&ChannelMsg::ExitStatus { code }).await;
     let _ = channel.send(&ChannelMsg::Eof).await;
     let _ = channel.send(&ChannelMsg::Close).await;
+
+    Ok(())
+}
+
+/// Spawn a shell and relay I/O using raw QUIC streams (no msgpack framing).
+pub async fn run_raw_shell(
+    mut data_send: quinn::SendStream,
+    mut data_recv: quinn::RecvStream,
+    mut ctrl_send: quinn::SendStream,
+    mut ctrl_recv: quinn::RecvStream,
+    username: &str,
+    remote_host: &str,
+    term: &str,
+    cols: u16,
+    rows: u16,
+    print_motd: bool,
+    print_last_log: bool,
+    banner: Option<String>,
+    on_spawn: impl FnOnce(&SpawnedShell),
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let (uid, gid, home, shell) = lookup_user(username)?;
+
+    // Send banner, last login, and MOTD as raw bytes on data stream
+    if let Some(ref content) = banner {
+        data_send.write_all(content.replace('\n', "\r\n").as_bytes()).await?;
+    }
+    if !has_hushlogin(&home) {
+        if print_last_log {
+            if let Some(msg) = get_and_update_lastlog(uid, remote_host) {
+                data_send.write_all(msg.as_bytes()).await?;
+            }
+        }
+        if print_motd {
+            if let Some(motd) = read_motd() {
+                data_send.write_all(motd.as_bytes()).await?;
+            }
+        }
+    }
+
+    let pty = openpty(None, None)?;
+    let master_fd = pty.master;
+    let slave_fd = pty.slave;
+
+    set_winsize(master_fd.as_raw_fd(), cols, rows);
+
+    let slave_raw = slave_fd.as_raw_fd();
+    let username_owned = username.to_string();
+
+    let mut cmd = std::process::Command::new(&shell);
+    cmd.arg("-l");
+    cmd.env("TERM", term);
+    cmd.env("HOME", &home);
+    cmd.env("USER", &username_owned);
+    cmd.env("LOGNAME", &username_owned);
+    cmd.env("SHELL", &shell);
+    cmd.current_dir(&home);
+    cmd.stdin(unsafe { Stdio::from_raw_fd(slave_raw) });
+    cmd.stdout(unsafe { Stdio::from_raw_fd(slave_raw) });
+    cmd.stderr(unsafe { Stdio::from_raw_fd(slave_raw) });
+
+    unsafe {
+        cmd.pre_exec(move || {
+            switch_user(uid, gid, &username_owned)?;
+            unistd::setsid().map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
+            libc::ioctl(slave_raw, libc::TIOCSCTTY as libc::c_ulong, 0);
+            Ok(())
+        });
+    }
+
+    let mut child = cmd.spawn()?;
+    drop(slave_fd);
+
+    let master_raw = master_fd.as_raw_fd();
+    unsafe {
+        let flags = libc::fcntl(master_raw, libc::F_GETFL);
+        libc::fcntl(master_raw, libc::F_SETFL, flags | libc::O_NONBLOCK);
+    }
+
+    on_spawn(&SpawnedShell {
+        master_raw_fd: master_raw,
+        child_pid: child.id(),
+        home: home.clone(),
+        shell: shell.clone(),
+    });
+
+    let master_afd = AsyncFd::new(master_fd)?;
+
+    // Relay loop: PTY ↔ raw streams
+    loop {
+        tokio::select! {
+            // PTY → data stream (raw bytes)
+            ready = master_afd.readable() => {
+                let mut guard = ready?;
+                match guard.try_io(|inner| {
+                    let mut buf = [0u8; 8192];
+                    let n = unsafe {
+                        libc::read(
+                            inner.as_raw_fd(),
+                            buf.as_mut_ptr() as *mut libc::c_void,
+                            buf.len(),
+                        )
+                    };
+                    if n < 0 {
+                        Err(std::io::Error::last_os_error())
+                    } else if n == 0 {
+                        Ok(Vec::new())
+                    } else {
+                        Ok(buf[..n as usize].to_vec())
+                    }
+                }) {
+                    Ok(Ok(data)) if data.is_empty() => break,
+                    Ok(Ok(data)) => {
+                        if data_send.write_all(&data).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        tracing::error!("PTY read error: {e}");
+                        break;
+                    }
+                    Err(_would_block) => continue,
+                }
+            }
+
+            // Data stream → PTY (raw bytes)
+            chunk = data_recv.read_chunk(8192, true) => {
+                match chunk {
+                    Ok(Some(chunk)) => {
+                        let fd = master_afd.get_ref().as_raw_fd();
+                        let payload = &chunk.bytes;
+                        let mut offset = 0;
+                        while offset < payload.len() {
+                            let n = unsafe {
+                                libc::write(
+                                    fd,
+                                    payload[offset..].as_ptr() as *const libc::c_void,
+                                    payload.len() - offset,
+                                )
+                            };
+                            if n <= 0 { break; }
+                            offset += n as usize;
+                        }
+                    }
+                    Ok(None) => break, // stream finished
+                    Err(_) => break,
+                }
+            }
+
+            // Control messages
+            ctrl = ShellControlMsg::decode(&mut ctrl_recv) => {
+                match ctrl {
+                    Ok(ShellControlMsg::WindowChange { cols, rows }) => {
+                        set_winsize(master_afd.get_ref().as_raw_fd(), cols as u16, rows as u16);
+                    }
+                    Ok(ShellControlMsg::Eof) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        }
+    }
+
+    // Wait for child and send exit status on control stream
+    let status = child.wait()?;
+    let code = status.code().unwrap_or(1) as u32;
+    let _ = ctrl_send.write_all(&ShellControlMsg::ExitStatus { code }.encode()).await;
+    let _ = ctrl_send.write_all(&ShellControlMsg::Eof.encode()).await;
+    let _ = data_send.finish();
+
+    Ok(())
+}
+
+/// Resume a persisted PTY session using raw QUIC streams.
+pub async fn resume_raw_shell(
+    mut data_send: quinn::SendStream,
+    mut data_recv: quinn::RecvStream,
+    mut ctrl_send: quinn::SendStream,
+    mut ctrl_recv: quinn::RecvStream,
+    master_raw_fd: std::os::unix::io::RawFd,
+    child_pid: u32,
+    cols: u16,
+    rows: u16,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    set_winsize(master_raw_fd, cols, rows);
+
+    unsafe {
+        let flags = libc::fcntl(master_raw_fd, libc::F_GETFL);
+        libc::fcntl(master_raw_fd, libc::F_SETFL, flags | libc::O_NONBLOCK);
+    }
+
+    let master_fd = unsafe { std::os::fd::OwnedFd::from_raw_fd(master_raw_fd) };
+    let master_afd = AsyncFd::new(master_fd)?;
+
+    loop {
+        tokio::select! {
+            ready = master_afd.readable() => {
+                let mut guard = ready?;
+                match guard.try_io(|inner| {
+                    let mut buf = [0u8; 8192];
+                    let n = unsafe {
+                        libc::read(
+                            inner.as_raw_fd(),
+                            buf.as_mut_ptr() as *mut libc::c_void,
+                            buf.len(),
+                        )
+                    };
+                    if n < 0 {
+                        Err(std::io::Error::last_os_error())
+                    } else if n == 0 {
+                        Ok(Vec::new())
+                    } else {
+                        Ok(buf[..n as usize].to_vec())
+                    }
+                }) {
+                    Ok(Ok(data)) if data.is_empty() => break,
+                    Ok(Ok(data)) => {
+                        if data_send.write_all(&data).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        tracing::error!("PTY read error: {e}");
+                        break;
+                    }
+                    Err(_would_block) => continue,
+                }
+            }
+
+            chunk = data_recv.read_chunk(8192, true) => {
+                match chunk {
+                    Ok(Some(chunk)) => {
+                        let fd = master_afd.get_ref().as_raw_fd();
+                        let payload = &chunk.bytes;
+                        let mut offset = 0;
+                        while offset < payload.len() {
+                            let n = unsafe {
+                                libc::write(
+                                    fd,
+                                    payload[offset..].as_ptr() as *const libc::c_void,
+                                    payload.len() - offset,
+                                )
+                            };
+                            if n <= 0 { break; }
+                            offset += n as usize;
+                        }
+                    }
+                    Ok(None) => break,
+                    Err(_) => break,
+                }
+            }
+
+            ctrl = ShellControlMsg::decode(&mut ctrl_recv) => {
+                match ctrl {
+                    Ok(ShellControlMsg::WindowChange { cols, rows }) => {
+                        set_winsize(master_afd.get_ref().as_raw_fd(), cols as u16, rows as u16);
+                    }
+                    Ok(ShellControlMsg::Eof) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        }
+    }
+
+    let mut status = 0i32;
+    let ret = unsafe { libc::waitpid(child_pid as i32, &mut status, libc::WNOHANG) };
+    let code = if ret > 0 {
+        if libc::WIFEXITED(status) {
+            libc::WEXITSTATUS(status) as u32
+        } else {
+            1
+        }
+    } else {
+        0
+    };
+
+    let _ = ctrl_send.write_all(&ShellControlMsg::ExitStatus { code }.encode()).await;
+    let _ = ctrl_send.write_all(&ShellControlMsg::Eof.encode()).await;
+    let _ = data_send.finish();
 
     Ok(())
 }
