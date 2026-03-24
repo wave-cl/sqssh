@@ -150,7 +150,7 @@ sftp> lcd ~/Downloads
 sftp> quit
 ```
 
-Uses a persistent command channel for navigation and metadata operations, with separate parallel streams for file transfers (get/put).
+Uses a raw binary protocol on a QUIC bidi stream for navigation and metadata operations, with separate uni streams for file transfers (get/put).
 
 ## Authentication
 
@@ -235,11 +235,12 @@ host.example.com sqssh-ed25519 CEFuAsD7Kn5ABJUb4S2ujJxrasBkpoDJCoaNvnh7qdRu
 
 - **Transport:** sQUIC over UDP (default port 22)
 - **Crypto:** Ed25519 keys, X25519 key exchange (via sQUIC), argon2id + chacha20-poly1305 for key encryption
-- **Serialization:** MessagePack with length-prefixed framing (control), raw bytes (file transfer)
+- **Serialization:** MessagePack for control channel only; shell, SFTP, and file transfers use raw binary encoding directly on QUIC streams
 - **ALPN:** `sqssh/1`
-- **Stream 0:** Control channel (auth, forwarding setup, disconnect)
-- **Streams 1+:** Application channels (session, port forwarding)
-- **Uni streams:** Raw file transfers (one QUIC stream per file, zero framing overhead)
+- **Stream 0:** Control channel (auth, disconnect) — msgpack framed
+- **Raw bidi streams:** Shell I/O (`0xB0`), shell control (`0xB1`), SFTP sessions (`0xC0`) — binary encoded, no msgpack
+- **Uni streams:** File transfers (one QUIC stream per file, zero framing overhead)
+- **Framed bidi streams:** Legacy session channel (exec, port forwarding) — msgpack framed
 
 ## Building
 

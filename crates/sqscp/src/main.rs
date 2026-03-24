@@ -214,9 +214,10 @@ async fn upload(
     let mut handles = Vec::new();
 
     // Single file with j > 1: use chunked parallel upload
+    let is_dir_dest = remote_path.ends_with('/') || remote_path == "~" || remote_path == ".";
     if files_total == 1 && jobs > 1 {
         let (local_path, rel_name) = files.into_iter().next().unwrap();
-        let upload_path = if remote_path.ends_with('/') {
+        let upload_path = if is_dir_dest {
             format!("{}/{}", remote_path.trim_end_matches('/'), rel_name)
         } else {
             remote_path.clone()
@@ -234,7 +235,8 @@ async fn upload(
             let handle = tokio::spawn(async move {
                 let _permit = sem.acquire().await.unwrap();
 
-                let upload_path = if files_total > 1 || dest.ends_with('/') {
+                let is_dir = files_total > 1 || dest.ends_with('/') || dest == "~" || dest == ".";
+                let upload_path = if is_dir {
                     format!("{}/{}", dest.trim_end_matches('/'), rel_name)
                 } else {
                     dest.clone()
@@ -354,7 +356,7 @@ async fn upload_file_raw(
         .map_err(|e| format!("finish error: {e}"))?;
     // stopped() resolves when the peer has read all data (stream fully drained)
     // or when they send STOP_SENDING
-    let _ = send.stopped().await;
+    // Don't wait for stopped() — finish() sends FIN, peer acks naturally.
 
     Ok(())
 }
@@ -450,7 +452,7 @@ async fn upload_file_chunked(
             }
 
             send.finish().map_err(|e| format!("finish: {e}"))?;
-            let _ = send.stopped().await;
+            // Don't wait for stopped() — finish() sends FIN, peer acks naturally.
             Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
         });
 
