@@ -117,7 +117,12 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     match control.recv().await? {
-        ControlMsg::AuthSuccess => {}
+        ControlMsg::AuthSuccess => {
+            // Auto-learn key mapping for this host
+            if let Some(key_name) = identity_path.file_name() {
+                keys::save_key_mapping(&host, &key_name.to_string_lossy()).ok();
+            }
+        }
         ControlMsg::AuthFailure { message } => {
             return Err(format!("authentication failed: {message}").into());
         }
