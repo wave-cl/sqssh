@@ -195,6 +195,12 @@ cargo build --release
 
 Binaries are in `target/release/`.
 
+## Future
+
+- **Port forwarding** — TCP local (`-L`), TCP remote (`-R`), SOCKS5 dynamic (`-D`), and native UDP forwarding (`-U`). Protocol types already defined.
+- **ProxyJump** — bastion host chaining (`sqssh -J bastion user@target`). Config directive already parsed.
+- **sqsftp** — SFTP-like interactive file transfer subsystem.
+
 ## License
 
 MIT

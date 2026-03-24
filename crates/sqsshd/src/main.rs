@@ -42,6 +42,10 @@ struct Cli {
     #[arg(long = "auth-mode")]
     auth_mode: Option<String>,
 
+    /// Disable connection migration
+    #[arg(long = "no-migration")]
+    no_migration: bool,
+
     /// Show the server's public key and exit
     #[arg(long = "show-pubkey")]
     show_pubkey: bool,
@@ -145,6 +149,10 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         };
     }
 
+    if cli.no_migration {
+        server_config.connection_migration = false;
+    }
+
     let signing_key = keys::load_private_key(&server_config.host_key)?;
     let verifying_key = signing_key.verifying_key();
 
@@ -180,6 +188,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         } else {
             None
         },
+        disable_active_migration: !server_config.connection_migration,
         ..Default::default()
     };
 
@@ -188,6 +197,10 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing::info!("sqsshd listening on {local_addr} (UDP)");
     tracing::info!("server pubkey: {}", keys::encode_pubkey(&verifying_key));
     tracing::info!("auth mode: {:?}", server_config.auth_mode);
+    tracing::info!(
+        "connection migration: {}",
+        if server_config.connection_migration { "enabled" } else { "disabled" }
+    );
 
     // Shutdown coordination
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -507,6 +520,28 @@ async fn handle_connection(
 
     control.send(&ControlMsg::AuthSuccess).await?;
     tracing::info!(user = %username, "auth success");
+
+    // Spawn migration monitor
+    let migration_conn = conn.clone();
+    let migration_remote = remote;
+    tokio::spawn(
+        async move {
+            let mut last = migration_remote;
+            loop {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                let current = migration_conn.remote_address();
+                if current != last {
+                    tracing::info!(
+                        from = %last,
+                        to = %current,
+                        "client migrated"
+                    );
+                    last = current;
+                }
+            }
+        }
+        .in_current_span(),
+    );
 
     // Handle channel requests
     loop {

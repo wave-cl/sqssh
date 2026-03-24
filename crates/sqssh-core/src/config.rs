@@ -332,6 +332,7 @@ pub struct ServerConfig {
     pub authorized_keys_file: String,
     pub max_sessions: usize,
     pub control_socket: PathBuf,
+    pub connection_migration: bool,
 }
 
 impl Default for ServerConfig {
@@ -344,6 +345,7 @@ impl Default for ServerConfig {
             authorized_keys_file: ".sqssh/authorized_keys".into(),
             max_sessions: 64,
             control_socket: PathBuf::from("/run/sqssh/control.sock"),
+            connection_migration: true,
         }
     }
 }
@@ -395,6 +397,13 @@ impl ServerConfig {
                         .map_err(|_| Error::Config(format!("invalid max sessions: {value}")))?;
                 }
                 "controlsocket" => config.control_socket = PathBuf::from(value),
+                "connectionmigration" => {
+                    config.connection_migration = match value.to_lowercase().as_str() {
+                        "yes" | "true" => true,
+                        "no" | "false" => false,
+                        _ => return Err(Error::Config(format!("invalid value: {value}"))),
+                    };
+                }
                 _ => {
                     tracing::warn!("unknown server config directive: {key}");
                 }
