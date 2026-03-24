@@ -2,13 +2,35 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
+use argon2::Argon2;
+use chacha20poly1305::aead::{Aead, KeyInit};
+use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use ed25519_dalek::{SigningKey, VerifyingKey};
+use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::error::{Error, Result};
 
 const PRIVATE_KEY_HEADER: &str = "SQSSH-ED25519-PRIVATE-KEY";
+const ENCRYPTED_KEY_HEADER: &str = "SQSSH-ED25519-ENCRYPTED-KEY";
 const PUBLIC_KEY_PREFIX: &str = "sqssh-ed25519";
+
+/// Encrypted key blob serialized as msgpack.
+#[derive(Serialize, Deserialize)]
+struct EncryptedKeyBlob {
+    /// Argon2 memory cost in KiB
+    m_cost: u32,
+    /// Argon2 time cost (iterations)
+    t_cost: u32,
+    /// Argon2 parallelism
+    p_cost: u32,
+    /// Random salt (16 bytes)
+    salt: Vec<u8>,
+    /// ChaCha20-Poly1305 nonce (12 bytes)
+    nonce: Vec<u8>,
+    /// Encrypted seed + poly1305 tag (48 bytes)
+    ciphertext: Vec<u8>,
+}
 
 /// Generate a new Ed25519 keypair.
 pub fn generate_keypair() -> (SigningKey, VerifyingKey) {
@@ -60,12 +82,157 @@ pub fn decode_private_key(s: &str) -> Result<SigningKey> {
 }
 
 /// Save a private key to a file with mode 0600.
+/// If passphrase is Some and non-empty, the key is encrypted.
 pub fn save_private_key(path: &Path, key: &SigningKey) -> Result<()> {
-    let encoded = encode_private_key(key);
-    let content = Zeroizing::new(format!("{PRIVATE_KEY_HEADER}\n{}\n", encoded.as_str()));
+    save_private_key_with_passphrase(path, key, None)
+}
+
+/// Save a private key, optionally encrypted with a passphrase.
+pub fn save_private_key_with_passphrase(
+    path: &Path,
+    key: &SigningKey,
+    passphrase: Option<&str>,
+) -> Result<()> {
+    let content = match passphrase {
+        Some(pp) if !pp.is_empty() => {
+            let encrypted = encrypt_seed(&key.to_bytes(), pp)?;
+            Zeroizing::new(format!("{ENCRYPTED_KEY_HEADER}\n{encrypted}\n"))
+        }
+        _ => {
+            let encoded = encode_private_key(key);
+            Zeroizing::new(format!("{PRIVATE_KEY_HEADER}\n{}\n", encoded.as_str()))
+        }
+    };
     fs::write(path, content.as_bytes())?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     Ok(())
+}
+
+/// Encrypt a 32-byte seed with a passphrase using argon2id + chacha20-poly1305.
+fn encrypt_seed(seed: &[u8; 32], passphrase: &str) -> Result<String> {
+    use rand::RngCore;
+
+    let mut salt = [0u8; 16];
+    let mut nonce_bytes = [0u8; 12];
+    rand::thread_rng().fill_bytes(&mut salt);
+    rand::thread_rng().fill_bytes(&mut nonce_bytes);
+
+    // Derive encryption key via argon2id
+    let mut derived_key = Zeroizing::new([0u8; 32]);
+    let argon2 = Argon2::new(
+        argon2::Algorithm::Argon2id,
+        argon2::Version::V0x13,
+        argon2::Params::new(65536, 3, 4, Some(32))
+            .map_err(|e| Error::Key(format!("argon2 params: {e}")))?,
+    );
+    argon2
+        .hash_password_into(passphrase.as_bytes(), &salt, derived_key.as_mut())
+        .map_err(|e| Error::Key(format!("argon2 hash: {e}")))?;
+
+    // Encrypt with chacha20-poly1305
+    let cipher = ChaCha20Poly1305::new_from_slice(derived_key.as_ref())
+        .map_err(|e| Error::Key(format!("cipher init: {e}")))?;
+    let nonce = Nonce::from_slice(&nonce_bytes);
+    let ciphertext = cipher
+        .encrypt(nonce, seed.as_ref())
+        .map_err(|e| Error::Key(format!("encrypt: {e}")))?;
+
+    let blob = EncryptedKeyBlob {
+        m_cost: 65536,
+        t_cost: 3,
+        p_cost: 4,
+        salt: salt.to_vec(),
+        nonce: nonce_bytes.to_vec(),
+        ciphertext,
+    };
+
+    let encoded = rmp_serde::to_vec(&blob)
+        .map_err(|e| Error::Serialization(e.to_string()))?;
+    Ok(bs58::encode(encoded).into_string())
+}
+
+/// Decrypt an encrypted key blob with a passphrase.
+fn decrypt_seed(encrypted_b58: &str, passphrase: &str) -> Result<SigningKey> {
+    let encoded = bs58::decode(encrypted_b58).into_vec()?;
+    let blob: EncryptedKeyBlob = rmp_serde::from_slice(&encoded)
+        .map_err(|e| Error::Serialization(e.to_string()))?;
+
+    if blob.salt.len() != 16 || blob.nonce.len() != 12 {
+        return Err(Error::InvalidKeyFormat("invalid encrypted key blob".into()));
+    }
+
+    // Derive key
+    let mut derived_key = Zeroizing::new([0u8; 32]);
+    let argon2 = Argon2::new(
+        argon2::Algorithm::Argon2id,
+        argon2::Version::V0x13,
+        argon2::Params::new(blob.m_cost, blob.t_cost, blob.p_cost, Some(32))
+            .map_err(|e| Error::Key(format!("argon2 params: {e}")))?,
+    );
+    argon2
+        .hash_password_into(passphrase.as_bytes(), &blob.salt, derived_key.as_mut())
+        .map_err(|e| Error::Key(format!("argon2 hash: {e}")))?;
+
+    // Decrypt
+    let cipher = ChaCha20Poly1305::new_from_slice(derived_key.as_ref())
+        .map_err(|e| Error::Key(format!("cipher init: {e}")))?;
+    let nonce = Nonce::from_slice(&blob.nonce);
+    let seed = cipher
+        .decrypt(nonce, blob.ciphertext.as_ref())
+        .map_err(|_| Error::Key("decryption failed (wrong passphrase?)".into()))?;
+
+    if seed.len() != 32 {
+        return Err(Error::InvalidKeyFormat("decrypted seed is not 32 bytes".into()));
+    }
+
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&seed);
+    let key = SigningKey::from_bytes(&arr);
+    arr.iter_mut().for_each(|b| *b = 0);
+    Ok(key)
+}
+
+/// Prompt for a passphrase with echo disabled.
+/// Falls back to plain read if stdin is not a terminal.
+pub fn prompt_passphrase(prompt: &str) -> Result<Zeroizing<String>> {
+    use std::io::{self, BufRead, Write};
+
+    eprint!("{prompt}");
+    io::stderr().flush().ok();
+
+    let stdin_fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(libc::STDIN_FILENO) };
+    let is_tty = unsafe { libc::isatty(libc::STDIN_FILENO) } == 1;
+
+    let orig = if is_tty {
+        let orig = nix::sys::termios::tcgetattr(stdin_fd).ok();
+        if let Some(ref o) = orig {
+            let mut noecho = o.clone();
+            noecho.local_flags.remove(nix::sys::termios::LocalFlags::ECHO);
+            nix::sys::termios::tcsetattr(stdin_fd, nix::sys::termios::SetArg::TCSANOW, &noecho).ok();
+        }
+        orig
+    } else {
+        None
+    };
+
+    let mut line = String::new();
+    let result = io::stdin().lock().read_line(&mut line);
+
+    // Restore echo
+    if let Some(ref o) = orig {
+        nix::sys::termios::tcsetattr(stdin_fd, nix::sys::termios::SetArg::TCSANOW, o).ok();
+        eprintln!(); // newline after hidden input
+    }
+
+    result.map_err(|e| Error::Key(format!("read passphrase: {e}")))?;
+    Ok(Zeroizing::new(line.trim_end().to_string()))
+}
+
+/// Check if a key file is encrypted (without reading the full file).
+pub fn is_encrypted_key(path: &Path) -> bool {
+    fs::read_to_string(path)
+        .map(|c| c.starts_with(ENCRYPTED_KEY_HEADER))
+        .unwrap_or(false)
 }
 
 /// Save a public key to a file.
@@ -78,6 +245,7 @@ pub fn save_public_key(path: &Path, key: &VerifyingKey, comment: &str) -> Result
 }
 
 /// Load a private key from a file.
+/// If the key is encrypted, prompts for passphrase interactively.
 pub fn load_private_key(path: &Path) -> Result<SigningKey> {
     let content = Zeroizing::new(fs::read_to_string(path)?);
     let mut lines = content.lines();
@@ -85,18 +253,50 @@ pub fn load_private_key(path: &Path) -> Result<SigningKey> {
     let header = lines
         .next()
         .ok_or_else(|| Error::InvalidKeyFormat("empty key file".into()))?;
-    if header != PRIVATE_KEY_HEADER {
-        return Err(Error::InvalidKeyFormat(format!(
-            "expected header '{PRIVATE_KEY_HEADER}', got '{header}'"
-        )));
-    }
 
-    let seed_line = lines
+    let data_line = lines
         .next()
         .ok_or_else(|| Error::InvalidKeyFormat("missing key data".into()))?
         .trim();
 
-    decode_private_key(seed_line)
+    if header == ENCRYPTED_KEY_HEADER {
+        let passphrase = prompt_passphrase(&format!(
+            "Enter passphrase for {}: ",
+            path.display()
+        ))?;
+        decrypt_seed(data_line, &passphrase)
+    } else if header == PRIVATE_KEY_HEADER {
+        decode_private_key(data_line)
+    } else {
+        Err(Error::InvalidKeyFormat(format!(
+            "unknown key header: '{header}'"
+        )))
+    }
+}
+
+/// Load a private key with an explicit passphrase (no interactive prompt).
+pub fn load_private_key_with_passphrase(path: &Path, passphrase: &str) -> Result<SigningKey> {
+    let content = Zeroizing::new(fs::read_to_string(path)?);
+    let mut lines = content.lines();
+
+    let header = lines
+        .next()
+        .ok_or_else(|| Error::InvalidKeyFormat("empty key file".into()))?;
+
+    let data_line = lines
+        .next()
+        .ok_or_else(|| Error::InvalidKeyFormat("missing key data".into()))?
+        .trim();
+
+    if header == ENCRYPTED_KEY_HEADER {
+        decrypt_seed(data_line, passphrase)
+    } else if header == PRIVATE_KEY_HEADER {
+        decode_private_key(data_line)
+    } else {
+        Err(Error::InvalidKeyFormat(format!(
+            "unknown key header: '{header}'"
+        )))
+    }
 }
 
 /// Load a public key from a file.

@@ -36,7 +36,8 @@ Same port number (22), different protocol (UDP instead of TCP). They coexist.
 ### Generate a keypair
 
 ```
-sqssh-keygen
+sqssh-keygen                    # prompts for optional passphrase
+sqssh-keygen -f ~/.sqssh/work   # custom path
 ```
 
 Creates `~/.sqssh/id_ed25519` and `~/.sqssh/id_ed25519.pub`.
@@ -198,10 +199,16 @@ sqssh uses Ed25519 exclusively, with Base58 encoding:
 # public key
 sqssh-ed25519 CEFuAsD7Kn5ABJUb4S2ujJxrasBkpoDJCoaNvnh7qdRu user@host
 
-# private key
+# private key (unencrypted)
 SQSSH-ED25519-PRIVATE-KEY
 <base58-encoded seed>
+
+# private key (passphrase-protected)
+SQSSH-ED25519-ENCRYPTED-KEY
+<base58-encoded encrypted blob>
 ```
+
+Passphrase-protected keys use argon2id (KDF) + chacha20-poly1305 (AEAD). Generate with `sqssh-keygen` — it prompts for a passphrase (leave empty for no encryption). Encrypted keys are auto-detected on load and prompt for the passphrase.
 
 Known hosts (`~/.sqssh/known_hosts`):
 

@@ -91,7 +91,21 @@ fn generate_key(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         cli.comment.clone()
     };
 
-    keys::save_private_key(&priv_path, &signing_key)?;
+    // Prompt for passphrase
+    let passphrase = keys::prompt_passphrase("Enter passphrase (empty for no passphrase): ")?;
+    if !passphrase.is_empty() {
+        let confirm = keys::prompt_passphrase("Enter same passphrase again: ")?;
+        if *passphrase != *confirm {
+            return Err("passphrases do not match".into());
+        }
+    }
+
+    let pp = if passphrase.is_empty() {
+        None
+    } else {
+        Some(passphrase.as_str())
+    };
+    keys::save_private_key_with_passphrase(&priv_path, &signing_key, pp)?;
     keys::save_public_key(&pub_path, &verifying_key, &comment)?;
 
     let encoded = keys::encode_pubkey(&verifying_key);
