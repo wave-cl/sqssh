@@ -10,7 +10,7 @@ use sqssh_core::stream::Channel;
 use tokio::io::unix::AsyncFd;
 
 /// Look up a system user by name. Returns (uid, gid, home, shell).
-fn lookup_user(username: &str) -> Result<(u32, u32, String, String), Box<dyn std::error::Error>> {
+pub fn lookup_user(username: &str) -> Result<(u32, u32, String, String), Box<dyn std::error::Error + Send + Sync>> {
     let user = nix::unistd::User::from_name(username)?
         .ok_or_else(|| format!("user '{username}' not found"))?;
     let shell = user
@@ -56,7 +56,7 @@ pub async fn run_exec(
     channel: &mut Channel,
     username: &str,
     command: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (uid, gid, home, shell) = lookup_user(username)?;
     let username_owned = username.to_string();
 
@@ -218,7 +218,7 @@ pub async fn run_shell(
     term: &str,
     cols: u16,
     rows: u16,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (uid, gid, home, shell) = lookup_user(username)?;
 
     // Print login messages before spawning the shell (like sshd does)

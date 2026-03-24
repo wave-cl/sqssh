@@ -12,6 +12,7 @@ use sqssh_core::protocol::{self, ChannelMsg, ChannelType, ControlMsg, CtlRequest
 use sqssh_core::stream::{Channel, ControlChannel};
 use tokio::sync::RwLock;
 
+mod file_handler;
 mod pty_handler;
 
 #[derive(Parser)]
@@ -68,7 +69,7 @@ async fn main() {
     }
 }
 
-async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Load server config file
     let config_path = cli
         .config
@@ -177,7 +178,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 async fn run_control_socket(
     path: &Path,
     state: &ServerState,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Create parent directory
     if let Some(parent) = path.parent() {
         tokio::fs::create_dir_all(parent).await.ok();
@@ -204,7 +205,7 @@ async fn run_control_socket(
 async fn handle_ctl_connection(
     stream: tokio::net::UnixStream,
     state: &ServerState,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     // Get peer credentials
@@ -349,7 +350,7 @@ fn update_whitelist(state: &ServerState, old_keys: &[[u8; 32]], new_keys: &[[u8;
 async fn handle_connection(
     incoming: quinn::Incoming,
     state: &ServerState,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let conn = incoming.await?;
     let remote = conn.remote_address();
     tracing::info!("new connection from {remote}");
@@ -416,6 +417,30 @@ async fn handle_connection(
                     }
                 });
             }
+            ChannelType::FileTransfer { direction, path } => {
+                channel.confirm().await?;
+                let user = username.clone();
+                tokio::spawn(async move {
+                    let result = match direction {
+                        protocol::TransferDirection::Upload => {
+                            file_handler::handle_upload(&mut channel, &user, &path).await
+                        }
+                        protocol::TransferDirection::Download => {
+                            file_handler::handle_download(&mut channel, &user, &path).await
+                        }
+                    };
+                    if let Err(e) = result {
+                        tracing::error!("file transfer error for '{path}': {e}");
+                        // Try to send error back to client
+                        let _ = channel
+                            .send(&ChannelMsg::FileResult {
+                                success: false,
+                                message: e.to_string(),
+                            })
+                            .await;
+                    }
+                });
+            }
             other => {
                 tracing::warn!("unsupported channel type: {other:?}");
                 channel.reject(1, "unsupported channel type").await?;
@@ -431,7 +456,7 @@ async fn handle_session(
     mut channel: Channel,
     username: &str,
     remote_host: &str,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let mut term = String::from("xterm-256color");
     let mut cols: u16 = 80;
     let mut rows: u16 = 24;

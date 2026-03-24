@@ -18,6 +18,7 @@ zeroize = { workspace = true }
 tokio-util = { workspace = true }
 quinn = { workspace = true }
 rand = { workspace = true }
+whoami = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

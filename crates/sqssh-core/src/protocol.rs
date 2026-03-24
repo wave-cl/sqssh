@@ -38,6 +38,9 @@ const MSG_WINDOW_CHANGE: u8 = 0x60;
 const MSG_SIGNAL: u8 = 0x61;
 const MSG_EXIT_STATUS: u8 = 0x62;
 const MSG_EXIT_SIGNAL: u8 = 0x63;
+const MSG_FILE_HEADER: u8 = 0x80;
+const MSG_FILE_RESULT: u8 = 0x81;
+const MSG_FILE_MANIFEST: u8 = 0x82;
 const MSG_EOF: u8 = 0x70;
 const MSG_CLOSE: u8 = 0x71;
 
@@ -81,6 +84,12 @@ pub enum ControlMsg {
 // -- Channel messages (per-channel bidi streams) --
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TransferDirection {
+    Upload,
+    Download,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ChannelType {
     Session,
     DirectTcpip {
@@ -92,6 +101,10 @@ pub enum ChannelType {
     DirectUdp {
         host: String,
         port: u16,
+    },
+    FileTransfer {
+        direction: TransferDirection,
+        path: String,
     },
 }
 
@@ -140,8 +153,34 @@ pub enum ChannelMsg {
         core_dumped: bool,
         message: String,
     },
+    FileHeader {
+        path: String,
+        size: u64,
+        mode: u32,
+        /// Modification time (seconds since epoch). 0 = not preserved.
+        mtime: u64,
+        /// Access time (seconds since epoch). 0 = not preserved.
+        atime: u64,
+    },
+    FileResult {
+        success: bool,
+        message: String,
+    },
+    FileManifest {
+        entries: Vec<ManifestEntry>,
+    },
     Eof,
     Close,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ManifestEntry {
+    pub path: String,
+    pub size: u64,
+    pub mode: u32,
+    pub is_dir: bool,
+    pub mtime: u64,
+    pub atime: u64,
 }
 
 // -- Wire encoding/decoding --
@@ -207,6 +246,9 @@ impl ChannelMsg {
             Self::Signal { .. } => MSG_SIGNAL,
             Self::ExitStatus { .. } => MSG_EXIT_STATUS,
             Self::ExitSignal { .. } => MSG_EXIT_SIGNAL,
+            Self::FileHeader { .. } => MSG_FILE_HEADER,
+            Self::FileResult { .. } => MSG_FILE_RESULT,
+            Self::FileManifest { .. } => MSG_FILE_MANIFEST,
             Self::Eof => MSG_EOF,
             Self::Close => MSG_CLOSE,
         }

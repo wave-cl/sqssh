@@ -1317,7 +1317,12 @@ name = "sqscp"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "libc",
  "sqssh-core",
+ "squic",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1386,6 +1391,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "whoami",
  "zeroize",
 ]
 
