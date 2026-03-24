@@ -21,6 +21,10 @@ struct Cli {
     /// Import an OpenSSH Ed25519 private key
     #[arg(long = "import-openssh")]
     import_openssh: Option<PathBuf>,
+
+    /// Change the passphrase of an existing key
+    #[arg(long = "change-passphrase")]
+    change_passphrase: Option<PathBuf>,
 }
 
 fn main() {
@@ -28,6 +32,17 @@ fn main() {
 
     if let Some(ref path) = cli.fingerprint {
         match show_fingerprint(path) {
+            Ok(()) => {}
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    if let Some(ref path) = cli.change_passphrase {
+        match change_passphrase(path) {
             Ok(()) => {}
             Err(e) => {
                 eprintln!("error: {e}");
@@ -128,6 +143,36 @@ fn show_fingerprint(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 
     let encoded = keys::encode_pubkey(&verifying_key);
     println!("{encoded}");
+
+    Ok(())
+}
+
+fn change_passphrase(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    // Load key (prompts for old passphrase if encrypted)
+    let signing_key = keys::load_private_key(path)?;
+
+    // Prompt for new passphrase
+    let new_passphrase = keys::prompt_passphrase("Enter new passphrase (empty to remove encryption): ")?;
+    if !new_passphrase.is_empty() {
+        let confirm = keys::prompt_passphrase("Enter same passphrase again: ")?;
+        if *new_passphrase != *confirm {
+            return Err("passphrases do not match".into());
+        }
+    }
+
+    let pp = if new_passphrase.is_empty() {
+        None
+    } else {
+        Some(new_passphrase.as_str())
+    };
+
+    keys::save_private_key_with_passphrase(path, &signing_key, pp)?;
+
+    if new_passphrase.is_empty() {
+        eprintln!("Passphrase removed from {}", path.display());
+    } else {
+        eprintln!("Passphrase changed for {}", path.display());
+    }
 
     Ok(())
 }

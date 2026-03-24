@@ -1,0 +1,14 @@
+[Unit]
+Description=sqssh server daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/sqsshd -c /etc/sqssh/sqsshd.conf
+ExecReload=/bin/kill -USR1 $MAINPID
+Restart=on-failure
+RestartSec=2
+RuntimeDirectory=sqssh
+
+[Install]
+WantedBy=multi-user.target
