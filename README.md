@@ -10,6 +10,7 @@ SSH runs over TCP. sqssh runs over sQUIC, which means:
 - **Connection migration** — roam between networks without dropping your session
 - **Multiplexed streams** — no head-of-line blocking between channels
 - **Silent server** — the server is invisible to unauthenticated scanners (sQUIC whitelisting)
+- **Parallel file transfers** — sqscp copies multiple files simultaneously over independent streams
 
 Same port number (22), different protocol (UDP instead of TCP). They coexist.
 
@@ -18,15 +19,15 @@ Same port number (22), different protocol (UDP instead of TCP). They coexist.
 | Tool | Status | Description |
 |------|--------|-------------|
 | `sqssh` | ✓ | Remote shell and command execution |
-| `sqsshd` | ✓ | Server daemon |
+| `sqsshd` | ✓ | Server daemon with two-layer auth |
 | `sqssh-keygen` | ✓ | Ed25519 key generation |
-| `sqscp` | — | Secure file copy |
+| `sqscp` | ✓ | Parallel secure file copy |
+| `sqsshctl` | ✓ | Live key reload without restart |
 | `sqsftp` | — | SFTP |
 | `sqssh-agent` | — | Key agent |
 | `sqssh-add` | — | Add keys to agent |
 | `sqssh-copy-id` | — | Deploy public keys to remote hosts |
 | `sqssh-keyscan` | — | Scan host public keys |
-| `sqsshctl` | — | Connection management |
 
 ## Quick start
 
@@ -46,15 +47,54 @@ sqssh -p 4022 user@host
 sqssh user@host ls -la
 ```
 
+### Copy files
+
+```
+sqscp localfile.txt user@host:/remote/path
+sqscp user@host:/remote/file.txt ./
+sqscp -r -j 16 ./project/ user@host:~/backup/
+sqscp -P -l 1000 largefile.bin user@host:/tmp/
+```
+
+Flags: `-r` recursive, `-j N` concurrent streams (default 8), `-P` preserve timestamps, `-l KB/s` bandwidth limit, `-q` quiet, `-v` verbose.
+
 ### Run the server
 
 ```
 sqsshd                          # listen on 0.0.0.0:22/udp
 sqsshd --port 4022              # custom port
 sqsshd --show-pubkey            # print server public key
+sqsshd --auth-mode open+user    # disable whitelist, use authorized_keys only
 ```
 
-Host key is stored at `/etc/sqssh/host_key` (generated on first run).
+Host key: `/etc/sqssh/host_key`. Server config: `/etc/sqssh/sqsshd.conf`.
+
+### Manage keys at runtime
+
+```
+sqsshctl reload-keys            # reload your own authorized_keys
+sqsshctl reload-keys --all      # reload all users (root only)
+```
+
+No server restart required. Communicates over Unix socket (`/run/sqssh/control.sock`).
+
+## Authentication
+
+sqssh uses a two-layer authentication model:
+
+**Layer 1 — Transport (sQUIC whitelist):** The server is silent to unknown clients. Only clients whose Ed25519 public key is in the whitelist can even reach the server. Unauthorized traffic is dropped at the MAC layer.
+
+**Layer 2 — User mapping (authorized_keys):** After passing the whitelist, the client's public key is checked against `~/.sqssh/authorized_keys` to determine which user account to map to.
+
+Three auth modes:
+
+| Mode | Description |
+|------|-------------|
+| `whitelist+user` | Both layers required (default) |
+| `whitelist-only` | Whitelist sufficient, no user mapping |
+| `open+user` | No whitelist, authorized_keys only (like SSH) |
+
+Ed25519 only. No passwords, no RSA, no ECDSA.
 
 ## Configuration
 
@@ -73,9 +113,13 @@ Host *
     ConnectionMigration yes
 ```
 
-### Supported directives
+### Client directives
 
 `Hostname`, `Port`, `User`, `IdentityFile`, `HostKey`, `ProxyJump`, `LocalForward`, `RemoteForward`, `UdpForward`, `DynamicForward`, `ConnectTimeout`, `KeepAliveInterval`, `StrictHostKeyChecking`, `ConnectionMigration`
+
+### Server directives (`/etc/sqssh/sqsshd.conf`)
+
+`ListenAddress`, `Port`, `HostKey`, `AuthMode`, `AuthorizedKeysFile`, `MaxSessions`, `ControlSocket`
 
 ## Key format
 
@@ -104,7 +148,7 @@ host.example.com sqssh-ed25519 CEFuAsD7Kn5ABJUb4S2ujJxrasBkpoDJCoaNvnh7qdRu
 - **Serialization:** MessagePack with length-prefixed framing
 - **ALPN:** `sqssh/1`
 - **Stream 0:** Control channel (auth, forwarding setup, disconnect)
-- **Streams 1+:** Application channels (session, port forwarding)
+- **Streams 1+:** Application channels (session, file transfer, port forwarding)
 
 ## Building
 
