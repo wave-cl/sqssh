@@ -10,6 +10,7 @@ path = "src/main.rs"
 [dependencies]
 sqssh-core = { workspace = true }
 squic = { workspace = true }
+quinn = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }

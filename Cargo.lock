@@ -1457,6 +1457,7 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "libc",
+ "quinn",
  "sqssh-core",
  "squic",
  "tokio",
@@ -1618,7 +1619,7 @@ dependencies = [
 [[package]]
 name = "squic"
 version = "0.1.0"
-source = "git+https://github.com/wave-cl/squic-rust#cd56f9b38c11386044a343348a3b09d96c77787b"
+source = "git+https://github.com/wave-cl/squic-rust#a3d6d01a6f6c77f6995bedf617826aa32380b688"
 dependencies = [
  "curve25519-dalek",
  "ed25519-dalek",

@@ -23,6 +23,14 @@ mod file_handler;
 mod pty_handler;
 mod sftp_handler;
 
+/// Result of accepting a stream from a QUIC connection.
+enum AcceptResult {
+    /// Bidirectional stream with channel protocol (sessions, sftp, file transfer).
+    Bidi(Channel, ChannelType),
+    /// Unidirectional stream (raw file upload).
+    Uni(quinn::RecvStream),
+}
+
 #[derive(Parser)]
 #[command(name = "sqsshd", about = "sqssh server daemon")]
 struct Cli {
@@ -803,11 +811,56 @@ async fn handle_connection(
         .in_current_span(),
     );
 
-    // Handle channel requests
+    // Handle channel requests (bidi) and raw file transfers (uni)
     loop {
-        let (mut channel, channel_type) = match Channel::accept(&conn).await {
-            Ok(v) => v,
-            Err(_) => break,
+        let accept_result = tokio::select! {
+            bidi = Channel::accept(&conn) => {
+                match bidi {
+                    Ok((channel, channel_type)) => AcceptResult::Bidi(channel, channel_type),
+                    Err(_) => break,
+                }
+            }
+            uni = conn.accept_uni() => {
+                match uni {
+                    Ok(recv) => AcceptResult::Uni(recv),
+                    Err(_) => break,
+                }
+            }
+        };
+
+        match accept_result {
+            AcceptResult::Uni(mut recv) => {
+                let user = username.clone();
+                tokio::spawn(async move {
+                    let mut type_buf = [0u8; 1];
+                    if let Err(e) = recv.read_exact(&mut type_buf).await {
+                        tracing::error!("failed to read uni stream type: {e}");
+                        return;
+                    }
+                    match type_buf[0] {
+                        protocol::RAW_UPLOAD => {
+                            if let Err(e) = file_handler::handle_raw_upload(recv, &user).await {
+                                tracing::error!("raw upload error: {e}");
+                            }
+                        }
+                        protocol::RAW_UPLOAD_CHUNK => {
+                            if let Err(e) = file_handler::handle_raw_upload_chunk(recv, &user).await {
+                                tracing::error!("raw chunk upload error: {e}");
+                            }
+                        }
+                        other => {
+                            tracing::warn!("unknown uni stream type: {other:#x}");
+                        }
+                    }
+                }.in_current_span());
+                continue;
+            }
+            AcceptResult::Bidi(_, _) => {}
+        }
+
+        let (mut channel, channel_type) = match accept_result {
+            AcceptResult::Bidi(c, t) => (c, t),
+            _ => unreachable!(),
         };
 
         match channel_type {
@@ -876,6 +929,21 @@ async fn handle_connection(
                                     message: e.to_string(),
                                 })
                                 .await;
+                        }
+                    }
+                    .in_current_span(),
+                );
+            }
+            ChannelType::RawDownload { path, jobs } => {
+                channel.confirm().await?;
+                let user = username.clone();
+                let conn_ref = conn.clone();
+                tokio::spawn(
+                    async move {
+                        if let Err(e) = file_handler::handle_raw_download(
+                            &conn_ref, &mut channel, &user, &path, jobs,
+                        ).await {
+                            tracing::error!(path = %path, "raw download error: {e}");
                         }
                     }
                     .in_current_span(),

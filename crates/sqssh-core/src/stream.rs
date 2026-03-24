@@ -107,4 +107,9 @@ impl Channel {
         })
         .await
     }
+
+    /// Get a mutable reference to the raw receive stream.
+    pub fn recv_stream(&mut self) -> &mut RecvStream {
+        &mut self.recv
+    }
 }
