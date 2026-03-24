@@ -1,4 +1,4 @@
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
@@ -310,4 +310,49 @@ pub async fn write_channel_msg(
 ) -> Result<()> {
     let data = msg.encode()?;
     write_frame(send, &data).await
+}
+
+// -- Control socket protocol (Unix domain socket, sqsshctl ↔ sqsshd) --
+
+/// Request from sqsshctl to sqsshd over the control socket.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum CtlRequest {
+    /// Reload the calling user's authorized_keys.
+    ReloadKeys,
+    /// Reload all users' authorized_keys (root only).
+    ReloadAllKeys,
+}
+
+/// Response from sqsshd to sqsshctl over the control socket.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum CtlResponse {
+    Ok { message: String },
+    Error { message: String },
+}
+
+/// Encode a control socket message as length-prefixed msgpack.
+pub fn ctl_encode<T: Serialize>(msg: &T) -> Result<Vec<u8>> {
+    let payload = rmp_serde::to_vec(msg)
+        .map_err(|e| Error::Serialization(e.to_string()))?;
+    let len = payload.len() as u32;
+    let mut buf = Vec::with_capacity(4 + payload.len());
+    buf.extend_from_slice(&len.to_be_bytes());
+    buf.extend_from_slice(&payload);
+    Ok(buf)
+}
+
+/// Decode a control socket message from a blocking reader.
+pub fn ctl_decode<T: for<'de> Deserialize<'de>>(reader: &mut impl std::io::Read) -> Result<T> {
+    let mut len_buf = [0u8; 4];
+    reader.read_exact(&mut len_buf)
+        .map_err(|e| Error::Connection(format!("failed to read ctl frame: {e}")))?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+    if len > MAX_MESSAGE_SIZE as usize {
+        return Err(Error::Protocol("ctl frame too large".into()));
+    }
+    let mut payload = vec![0u8; len];
+    reader.read_exact(&mut payload)
+        .map_err(|e| Error::Connection(format!("failed to read ctl payload: {e}")))?;
+    rmp_serde::from_slice(&payload)
+        .map_err(|e| Error::Serialization(e.to_string()))
 }

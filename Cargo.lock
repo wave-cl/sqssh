@@ -1415,6 +1415,7 @@ name = "sqsshctl"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "rmp-serde",
  "sqssh-core",
 ]
 
@@ -1428,6 +1429,7 @@ dependencies = [
  "libc",
  "nix",
  "quinn",
+ "rmp-serde",
  "sqssh-core",
  "squic",
  "tokio",
