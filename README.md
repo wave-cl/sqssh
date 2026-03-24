@@ -52,7 +52,7 @@ sqssh -i ~/.sqssh/work_key user@host
 sqssh user@host ls -la
 ```
 
-Escape sequences: `~.` disconnect, `~?` help, `~~` literal tilde. Auto-reconnects on connection loss without re-prompting for passphrase.
+Escape sequences: `~.` disconnect, `~?` help, `~~` literal tilde. Auto-reconnects on network loss without re-prompting for passphrase. Exits cleanly on server shutdown. Default connect timeout: 3 seconds (configurable via `ConnectTimeout`).
 
 **Key resolution order:** `-i` flag → config `IdentityFile` → agent → learned `~/.sqssh/key_map` → default `id_ed25519`. On successful connect, the host→key mapping is saved to `key_map` automatically.
 
@@ -81,7 +81,7 @@ sqsshd --log-json               # JSON-formatted output
 
 Host key: `/etc/sqssh/host_key`. Server config: `/etc/sqssh/sqsshd.conf`.
 
-Handles SIGTERM/SIGINT gracefully — drains active connections (30s timeout), cleans up the control socket, and exits cleanly.
+Handles SIGTERM/SIGINT gracefully — sends SIGHUP to child shells, drains active connections (5s timeout with watchdog), cleans up the control socket, and exits cleanly.
 
 ### Zero-downtime restarts
 
@@ -193,7 +193,7 @@ Host *
 
 ### Server directives (`/etc/sqssh/sqsshd.conf`)
 
-`ListenAddress`, `Port`, `HostKey`, `AuthMode`, `AuthorizedKeysFile`, `MaxSessions`, `ControlSocket`, `ConnectionMigration`
+`ListenAddress`, `Port`, `HostKey`, `AuthMode`, `AuthorizedKeysFile`, `MaxSessions`, `MaxAuthTries`, `ControlSocket`, `ConnectionMigration`, `AllowUsers`, `DenyUsers`, `PrintMotd`, `PrintLastLog`, `Banner`
 
 ## Key format
 
