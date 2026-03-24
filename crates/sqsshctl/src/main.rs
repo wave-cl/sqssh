@@ -12,7 +12,7 @@ struct Cli {
     command: Command,
 
     /// Control socket path
-    #[arg(short = 's', long, default_value = "/run/sqssh/control.sock")]
+    #[arg(short = 's', long, default_value = "/var/run/sqssh/control.sock")]
     socket: PathBuf,
 }
 

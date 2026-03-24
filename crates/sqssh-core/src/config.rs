@@ -350,7 +350,7 @@ impl Default for ServerConfig {
             auth_mode: AuthMode::WhitelistAndUser,
             authorized_keys_file: ".sqssh/authorized_keys".into(),
             max_sessions: 64,
-            control_socket: PathBuf::from("/run/sqssh/control.sock"),
+            control_socket: PathBuf::from("/var/run/sqssh/control.sock"),
             connection_migration: true,
             allow_users: Vec::new(),
             deny_users: Vec::new(),

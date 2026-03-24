@@ -551,7 +551,7 @@ async fn persist_sessions(state: &ServerState) {
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Connect to persist helper
-    let stream = match std::os::unix::net::UnixStream::connect("/run/sqssh/persist.sock") {
+    let stream = match std::os::unix::net::UnixStream::connect("/var/run/sqssh/persist.sock") {
         Ok(s) => s,
         Err(e) => {
             tracing::error!("failed to connect to sqssh-persist: {e}");
@@ -593,7 +593,7 @@ async fn recover_persisted_sessions(state: &ServerState) {
     use sqssh_core::persist::PersistPayload;
 
     // Try to connect to existing sqssh-persist
-    let stream = match std::os::unix::net::UnixStream::connect("/run/sqssh/persist.sock") {
+    let stream = match std::os::unix::net::UnixStream::connect("/var/run/sqssh/persist.sock") {
         Ok(s) => s,
         Err(_) => return, // No persist helper running — normal startup
     };

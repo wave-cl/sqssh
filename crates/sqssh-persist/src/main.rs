@@ -14,7 +14,7 @@ use std::path::Path;
 use sqssh_core::fdpass;
 use sqssh_core::persist::PersistPayload;
 
-const SOCKET_PATH: &str = "/run/sqssh/persist.sock";
+const SOCKET_PATH: &str = "/var/run/sqssh/persist.sock";
 const TIMEOUT_SECS: u64 = 120; // exit if no recovery within 2 minutes
 
 fn main() {
