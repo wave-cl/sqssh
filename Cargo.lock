@@ -1365,7 +1365,12 @@ name = "sqsftp"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "quinn",
  "sqssh-core",
+ "squic",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1376,6 +1381,7 @@ dependencies = [
  "clap",
  "libc",
  "nix",
+ "quinn",
  "sqssh-core",
  "squic",
  "tokio",

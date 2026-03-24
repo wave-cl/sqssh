@@ -140,7 +140,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     if cli.command.is_empty() {
         // Interactive shell
-        run_interactive_shell(&mut channel).await
+        run_interactive_shell(&mut channel, &conn).await
     } else {
         // Remote command
         let cmd = cli.command.join(" ");
@@ -150,6 +150,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
 async fn run_interactive_shell(
     channel: &mut Channel,
+    conn: &quinn::Connection,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Get terminal size
     let (cols, rows) = term_size();
@@ -192,6 +193,9 @@ async fn run_interactive_shell(
         libc::signal(libc::SIGQUIT, libc::SIG_DFL);
     }
     restore_terminal(&orig_termios);
+
+    // Close the QUIC connection so the server cleans up
+    conn.close(quinn::VarInt::from_u32(0), b"client disconnect");
 
     // Exit immediately — the blocking stdin reader thread would otherwise
     // keep the process alive until the next keypress.
@@ -242,12 +246,19 @@ async fn run_remote_command(
     Ok(())
 }
 
+/// Escape sequence state machine.
+enum EscapeState {
+    Normal,
+    /// Last byte was a newline (or start of connection).
+    AfterNewline,
+    /// Saw ~ after newline, waiting for next byte.
+    SawTilde,
+}
+
 async fn relay_stdio(channel: &mut Channel) -> Result<i32, Box<dyn std::error::Error>> {
     let mut exit_code = 0i32;
+    let mut escape = EscapeState::AfterNewline; // start as "after newline"
 
-    // Spawn stdin reader on a blocking thread so it doesn't hold up the
-    // select loop — tokio::io::stdin().read() is not cancellation-safe and
-    // will block until data arrives, preventing us from seeing channel close.
     let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
     tokio::task::spawn_blocking(move || {
         use std::io::Read;
@@ -268,7 +279,6 @@ async fn relay_stdio(channel: &mut Channel) -> Result<i32, Box<dyn std::error::E
         tokio::select! {
             biased;
 
-            // channel → stdout (check first so we see close promptly)
             msg = channel.recv() => {
                 match msg? {
                     ChannelMsg::Data { payload } => {
@@ -290,11 +300,78 @@ async fn relay_stdio(channel: &mut Channel) -> Result<i32, Box<dyn std::error::E
                 }
             }
 
-            // stdin → channel
             data = stdin_rx.recv() => {
                 match data {
                     Some(payload) => {
-                        channel.send(&ChannelMsg::Data { payload }).await?;
+                        // Process escape sequences byte by byte
+                        let mut send_buf = Vec::with_capacity(payload.len());
+                        let mut should_disconnect = false;
+
+                        for &byte in &payload {
+                            match escape {
+                                EscapeState::Normal => {
+                                    if byte == b'\r' || byte == b'\n' {
+                                        escape = EscapeState::AfterNewline;
+                                    }
+                                    send_buf.push(byte);
+                                }
+                                EscapeState::AfterNewline => {
+                                    if byte == b'~' {
+                                        escape = EscapeState::SawTilde;
+                                        // Don't send ~ yet — buffer it
+                                    } else {
+                                        if byte == b'\r' || byte == b'\n' {
+                                            escape = EscapeState::AfterNewline;
+                                        } else {
+                                            escape = EscapeState::Normal;
+                                        }
+                                        send_buf.push(byte);
+                                    }
+                                }
+                                EscapeState::SawTilde => {
+                                    match byte {
+                                        b'.' => {
+                                            // ~. → disconnect
+                                            should_disconnect = true;
+                                            break;
+                                        }
+                                        b'?' => {
+                                            // ~? → show help
+                                            let help = "\r\nSupported escape sequences:\r\n  ~.  Disconnect\r\n  ~?  Show this help\r\n  ~~  Send literal ~\r\n";
+                                            let mut stderr = tokio::io::stderr();
+                                            stderr.write_all(help.as_bytes()).await?;
+                                            stderr.flush().await?;
+                                            escape = EscapeState::Normal;
+                                        }
+                                        b'~' => {
+                                            // ~~ → send literal ~
+                                            send_buf.push(b'~');
+                                            escape = EscapeState::Normal;
+                                        }
+                                        _ => {
+                                            // Not an escape — send the buffered ~ and this byte
+                                            send_buf.push(b'~');
+                                            send_buf.push(byte);
+                                            if byte == b'\r' || byte == b'\n' {
+                                                escape = EscapeState::AfterNewline;
+                                            } else {
+                                                escape = EscapeState::Normal;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if should_disconnect {
+                            eprintln!("\r\nConnection to remote closed.");
+                            channel.send(&ChannelMsg::Eof).await.ok();
+                            break;
+                        }
+
+                        if !send_buf.is_empty() {
+                            channel.send(&ChannelMsg::Data { payload: send_buf }).await?;
+                        }
                     }
                     None => {
                         channel.send(&ChannelMsg::Eof).await?;

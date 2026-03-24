@@ -333,6 +333,12 @@ pub struct ServerConfig {
     pub max_sessions: usize,
     pub control_socket: PathBuf,
     pub connection_migration: bool,
+    pub allow_users: Vec<String>,
+    pub deny_users: Vec<String>,
+    pub print_motd: bool,
+    pub print_last_log: bool,
+    pub banner: Option<PathBuf>,
+    pub max_auth_tries: usize,
 }
 
 impl Default for ServerConfig {
@@ -346,6 +352,12 @@ impl Default for ServerConfig {
             max_sessions: 64,
             control_socket: PathBuf::from("/run/sqssh/control.sock"),
             connection_migration: true,
+            allow_users: Vec::new(),
+            deny_users: Vec::new(),
+            print_motd: true,
+            print_last_log: true,
+            banner: None,
+            max_auth_tries: 6,
         }
     }
 }
@@ -403,6 +415,32 @@ impl ServerConfig {
                         "no" | "false" => false,
                         _ => return Err(Error::Config(format!("invalid value: {value}"))),
                     };
+                }
+                "allowusers" => {
+                    config.allow_users = value.split_whitespace().map(String::from).collect();
+                }
+                "denyusers" => {
+                    config.deny_users = value.split_whitespace().map(String::from).collect();
+                }
+                "printmotd" => {
+                    config.print_motd = match value.to_lowercase().as_str() {
+                        "yes" | "true" => true,
+                        "no" | "false" => false,
+                        _ => return Err(Error::Config(format!("invalid value: {value}"))),
+                    };
+                }
+                "printlastlog" => {
+                    config.print_last_log = match value.to_lowercase().as_str() {
+                        "yes" | "true" => true,
+                        "no" | "false" => false,
+                        _ => return Err(Error::Config(format!("invalid value: {value}"))),
+                    };
+                }
+                "banner" => config.banner = Some(PathBuf::from(value)),
+                "maxauthtries" => {
+                    config.max_auth_tries = value
+                        .parse()
+                        .map_err(|_| Error::Config(format!("invalid max auth tries: {value}")))?;
                 }
                 _ => {
                     tracing::warn!("unknown server config directive: {key}");

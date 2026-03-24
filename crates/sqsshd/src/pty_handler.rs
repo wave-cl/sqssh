@@ -218,27 +218,31 @@ pub async fn run_shell(
     term: &str,
     cols: u16,
     rows: u16,
+    print_motd: bool,
+    print_last_log: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (uid, gid, home, shell) = lookup_user(username)?;
 
     // Print login messages before spawning the shell (like sshd does)
     if !has_hushlogin(&home) {
-        // Get last login and update lastlog (must read old before writing new)
-        if let Some(last_login_msg) = get_and_update_lastlog(uid, remote_host) {
-            channel
-                .send(&ChannelMsg::Data {
-                    payload: last_login_msg.into_bytes(),
-                })
-                .await?;
+        if print_last_log {
+            if let Some(last_login_msg) = get_and_update_lastlog(uid, remote_host) {
+                channel
+                    .send(&ChannelMsg::Data {
+                        payload: last_login_msg.into_bytes(),
+                    })
+                    .await?;
+            }
         }
 
-        // Print MOTD
-        if let Some(motd) = read_motd() {
-            channel
-                .send(&ChannelMsg::Data {
-                    payload: motd.into_bytes(),
-                })
-                .await?;
+        if print_motd {
+            if let Some(motd) = read_motd() {
+                channel
+                    .send(&ChannelMsg::Data {
+                        payload: motd.into_bytes(),
+                    })
+                    .await?;
+            }
         }
     }
 

@@ -71,6 +71,14 @@ struct ServerState {
     ak_relative: String,
     listener: squic::ServerListener,
     shutdown_rx: watch::Receiver<bool>,
+    allow_users: Vec<String>,
+    deny_users: Vec<String>,
+    print_motd: bool,
+    print_last_log: bool,
+    banner: Option<PathBuf>,
+    max_auth_tries: usize,
+    max_sessions: usize,
+    active_sessions: std::sync::atomic::AtomicUsize,
 }
 
 /// Convert an Ed25519 pubkey to X25519 bytes for the squic whitelist.
@@ -212,6 +220,14 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         ak_relative: server_config.authorized_keys_file.clone(),
         listener,
         shutdown_rx: shutdown_rx.clone(),
+        allow_users: server_config.allow_users.clone(),
+        deny_users: server_config.deny_users.clone(),
+        print_motd: server_config.print_motd,
+        print_last_log: server_config.print_last_log,
+        banner: server_config.banner.clone(),
+        max_auth_tries: server_config.max_auth_tries,
+        max_sessions: server_config.max_sessions,
+        active_sessions: std::sync::atomic::AtomicUsize::new(0),
     });
 
     // Spawn control socket listener
@@ -246,7 +262,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     let remote = incoming.remote_address();
                     let span = tracing::info_span!("conn", remote = %remote);
                     async {
-                        if let Err(e) = handle_connection(incoming, &state).await {
+                        if let Err(e) = handle_connection(incoming, state.clone()).await {
                             tracing::error!("connection error: {e}");
                         }
                     }
@@ -474,7 +490,7 @@ fn update_whitelist(state: &ServerState, old_keys: &[[u8; 32]], new_keys: &[[u8;
 
 async fn handle_connection(
     incoming: quinn::Incoming,
-    state: &ServerState,
+    state: Arc<ServerState>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let conn = incoming.await?;
     let remote = conn.remote_address();
@@ -483,44 +499,93 @@ async fn handle_connection(
     // Accept control channel (stream 0)
     let mut control = ControlChannel::accept(&conn).await?;
 
-    let auth_msg = control.recv().await?;
-    let (username, pubkey_bytes) = match auth_msg {
-        ControlMsg::AuthRequest {
-            username, pubkey, ..
-        } => {
-            tracing::info!(user = %username, "auth request");
-            let pubkey_bytes: [u8; 32] = pubkey
-                .try_into()
-                .map_err(|_| "invalid pubkey length")?;
-            (username, pubkey_bytes)
+    // Auth loop with MaxAuthTries
+    let mut auth_attempts = 0usize;
+    let (username, _pubkey_bytes) = loop {
+        let auth_msg = control.recv().await?;
+        let (username, pubkey_bytes) = match auth_msg {
+            ControlMsg::AuthRequest {
+                username, pubkey, ..
+            } => {
+                tracing::info!(user = %username, "auth request");
+                let pubkey_bytes: [u8; 32] = pubkey
+                    .try_into()
+                    .map_err(|_| "invalid pubkey length")?;
+                (username, pubkey_bytes)
+            }
+            other => {
+                tracing::warn!("expected AuthRequest, got {other:?}");
+                return Ok(());
+            }
+        };
+
+        auth_attempts += 1;
+
+        // Check AllowUsers
+        if !state.allow_users.is_empty() && !state.allow_users.contains(&username) {
+            tracing::warn!(user = %username, "rejected by AllowUsers");
+            control
+                .send(&ControlMsg::AuthFailure {
+                    message: "user not allowed".into(),
+                })
+                .await?;
+            if auth_attempts >= state.max_auth_tries {
+                tracing::warn!("max auth tries exceeded");
+                return Ok(());
+            }
+            continue;
         }
-        other => {
-            tracing::warn!("expected AuthRequest, got {other:?}");
+
+        // Check DenyUsers
+        if state.deny_users.contains(&username) {
+            tracing::warn!(user = %username, "rejected by DenyUsers");
+            control
+                .send(&ControlMsg::AuthFailure {
+                    message: "user denied".into(),
+                })
+                .await?;
+            if auth_attempts >= state.max_auth_tries {
+                tracing::warn!("max auth tries exceeded");
+                return Ok(());
+            }
+            continue;
+        }
+
+        // Validate auth based on mode
+        let authorized = match state.auth_mode {
+            AuthMode::WhitelistAndUser | AuthMode::OpenAndUser => {
+                let vk = VerifyingKey::from_bytes(&pubkey_bytes)
+                    .map_err(|_| "invalid ed25519 pubkey")?;
+                let ak = state.authorized_keys.read().await;
+                ak.is_authorized(&vk, &username)
+            }
+            AuthMode::WhitelistOnly => true,
+        };
+
+        if authorized {
+            break (username, pubkey_bytes);
+        }
+
+        tracing::warn!(user = %username, "auth rejected");
+        control
+            .send(&ControlMsg::AuthFailure {
+                message: "pubkey not authorized for this user".into(),
+            })
+            .await?;
+
+        if auth_attempts >= state.max_auth_tries {
+            tracing::warn!("max auth tries exceeded, disconnecting");
             return Ok(());
         }
     };
 
-    // Validate auth based on mode
-    match state.auth_mode {
-        AuthMode::WhitelistAndUser | AuthMode::OpenAndUser => {
-            let vk = VerifyingKey::from_bytes(&pubkey_bytes)
-                .map_err(|_| "invalid ed25519 pubkey")?;
-            let ak = state.authorized_keys.read().await;
-            if !ak.is_authorized(&vk, &username) {
-                tracing::warn!(user = %username, "auth rejected");
-                control
-                    .send(&ControlMsg::AuthFailure {
-                        message: "pubkey not authorized for this user".into(),
-                    })
-                    .await?;
-                return Ok(());
-            }
-        }
-        AuthMode::WhitelistOnly => {}
-    }
-
     control.send(&ControlMsg::AuthSuccess).await?;
     tracing::info!(user = %username, "auth success");
+
+    // Read banner file content for sending on first session channel
+    let banner_content = state.banner.as_ref().and_then(|path| {
+        std::fs::read_to_string(path).ok()
+    });
 
     // Spawn migration monitor
     let migration_conn = conn.clone();
@@ -553,14 +618,29 @@ async fn handle_connection(
 
         match channel_type {
             ChannelType::Session => {
+                // Enforce MaxSessions
+                use std::sync::atomic::Ordering::Relaxed;
+                let current = state.active_sessions.fetch_add(1, Relaxed);
+                if current >= state.max_sessions {
+                    state.active_sessions.fetch_sub(1, Relaxed);
+                    tracing::warn!("max sessions ({}) reached, rejecting", state.max_sessions);
+                    channel.reject(1, "too many sessions").await?;
+                    continue;
+                }
+
                 channel.confirm().await?;
                 let user = username.clone();
                 let remote_host = remote.ip().to_string();
+                let print_motd = state.print_motd;
+                let print_last_log = state.print_last_log;
+                let banner = banner_content.clone();
+                let state_ref = state.clone();
                 tokio::spawn(
                     async move {
-                        if let Err(e) = handle_session(channel, &user, &remote_host).await {
+                        if let Err(e) = handle_session(channel, &user, &remote_host, print_motd, print_last_log, banner).await {
                             tracing::error!("session error: {e}");
                         }
+                        state_ref.active_sessions.fetch_sub(1, Relaxed);
                     }
                     .in_current_span(),
                 );
@@ -618,7 +698,19 @@ async fn handle_session(
     mut channel: Channel,
     username: &str,
     remote_host: &str,
+    print_motd: bool,
+    print_last_log: bool,
+    banner: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Send banner if configured
+    if let Some(ref content) = banner {
+        channel
+            .send(&ChannelMsg::Data {
+                payload: content.replace('\n', "\r\n").into_bytes(),
+            })
+            .await?;
+    }
+
     let mut term = String::from("xterm-256color");
     let mut cols: u16 = 80;
     let mut rows: u16 = 24;
@@ -650,5 +742,5 @@ async fn handle_session(
         }
     }
 
-    pty_handler::run_shell(&mut channel, username, remote_host, &term, cols, rows).await
+    pty_handler::run_shell(&mut channel, username, remote_host, &term, cols, rows, print_motd, print_last_log).await
 }
