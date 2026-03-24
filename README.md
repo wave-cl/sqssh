@@ -36,8 +36,9 @@ Same port number (22), different protocol (UDP instead of TCP). They coexist.
 ### Generate a keypair
 
 ```
-sqssh-keygen                    # prompts for optional passphrase
-sqssh-keygen -f ~/.sqssh/work   # custom path
+sqssh-keygen                                    # prompts for optional passphrase
+sqssh-keygen -f ~/.sqssh/work                   # custom path
+sqssh-keygen --change-passphrase ~/.sqssh/id_ed25519  # change or remove passphrase
 ```
 
 Creates `~/.sqssh/id_ed25519` and `~/.sqssh/id_ed25519.pub`. Passphrase-protected keys are encrypted with argon2id + chacha20-poly1305.
@@ -243,9 +244,30 @@ host.example.com sqssh-ed25519 CEFuAsD7Kn5ABJUb4S2ujJxrasBkpoDJCoaNvnh7qdRu
 
 ```
 cargo build --release
+cargo test                      # run integration tests
 ```
 
 Binaries are in `target/release/`.
+
+## Deployment
+
+Install binaries and config:
+
+```
+sudo cp target/release/sqssh* /usr/local/bin/
+sudo mkdir -p /etc/sqssh
+sudo cp etc/sqsshd.conf /etc/sqssh/
+sqssh-keygen -f /etc/sqssh/host_key   # generate server host key
+```
+
+Systemd (included in `etc/sqsshd.service`):
+
+```
+sudo cp etc/sqsshd.service /etc/systemd/system/
+sudo systemctl enable sqsshd
+sudo systemctl start sqsshd
+sudo systemctl reload sqsshd    # zero-downtime restart (SIGUSR1)
+```
 
 ## Future
 
