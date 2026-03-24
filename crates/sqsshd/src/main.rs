@@ -136,15 +136,22 @@ fn init_logging(cli: &Cli) {
     }
 }
 
-#[tokio::main]
-async fn main() {
-    let cli = Cli::parse();
-    init_logging(&cli);
+fn main() {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name("sqsshd-worker")
+        .build()
+        .expect("failed to build tokio runtime");
 
-    if let Err(e) = run(cli).await {
-        eprintln!("error: {e}");
-        std::process::exit(1);
-    }
+    rt.block_on(async {
+        let cli = Cli::parse();
+        init_logging(&cli);
+
+        if let Err(e) = run(cli).await {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    });
 }
 
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -318,6 +325,23 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
     }
 
+    // Send SIGHUP to all child shell processes so they exit
+    {
+        let sessions = state.pty_sessions.lock().await;
+        for (_, session) in sessions.iter() {
+            unsafe { libc::kill(session.info.child_pid as i32, libc::SIGHUP); }
+        }
+    }
+
+    // Watchdog: force exit after 5 seconds regardless of tokio state
+    let ctl_sock = server_config.control_socket.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(5));
+        std::fs::remove_file(&ctl_sock).ok();
+        tracing::warn!("shutdown timeout, forcing exit");
+        std::process::exit(0);
+    });
+
     // Signal shutdown to all handlers
     shutdown_tx.send(true).ok();
 
@@ -326,27 +350,20 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .listener
         .close(quinn::VarInt::from_u32(0), b"server shutting down");
 
-    // Wait for active tasks with timeout
+    // Wait for active tasks to finish (watchdog guarantees we exit within 5s)
     if !tasks.is_empty() {
         tracing::info!(
             "waiting for {} active connection(s) to finish...",
             tasks.len()
         );
-        let drain = async {
-            while tasks.join_next().await.is_some() {}
-        };
-        match tokio::time::timeout(Duration::from_secs(30), drain).await {
-            Ok(()) => tracing::info!("all connections drained"),
-            Err(_) => tracing::warn!("shutdown timeout, {} task(s) abandoned", tasks.len()),
-        }
+        while tasks.join_next().await.is_some() {}
+        tracing::info!("all connections drained");
     }
 
     // Clean up control socket
     std::fs::remove_file(&server_config.control_socket).ok();
 
     tracing::info!("sqsshd shutdown complete");
-
-    // Force exit — tokio runtime and QUIC endpoint hold resources that prevent clean drop
     std::process::exit(0);
 }
 

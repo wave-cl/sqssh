@@ -167,7 +167,7 @@ impl ResolvedConfig {
             remote_forwards: defaults.remote_forwards.clone(),
             dynamic_forward: defaults.dynamic_forward,
             udp_forwards: defaults.udp_forwards.clone(),
-            connect_timeout: defaults.connect_timeout.unwrap_or(10),
+            connect_timeout: defaults.connect_timeout.unwrap_or(3),
             keepalive_interval: defaults.keepalive_interval.unwrap_or(15),
             strict_host_key_checking: defaults
                 .strict_host_key_checking

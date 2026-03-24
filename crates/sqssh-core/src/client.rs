@@ -133,12 +133,16 @@ pub async fn connect(
         alpn_protocols: vec![protocol::ALPN.to_vec()],
         keep_alive: Some(std::time::Duration::from_secs(resolved.keepalive_interval)),
         client_key: Some(client_key_hex),
+        handshake_timeout: Some(std::time::Duration::from_secs(resolved.connect_timeout)),
         ..Default::default()
     };
 
     let conn = squic::dial(addr, server_pubkey.as_bytes(), squic_config)
         .await
-        .map_err(|e| Error::Connection(format!("squic dial failed: {e}")))?;
+        .map_err(|e| {
+            let hint = crate::error::format_connection_error(&e.to_string());
+            Error::Connection(hint)
+        })?;
 
     // Authenticate on control channel
     let mut control = ControlChannel::open(&conn).await?;
