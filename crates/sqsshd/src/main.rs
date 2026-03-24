@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap::Parser;
 use ed25519_dalek::VerifyingKey;
@@ -10,7 +11,10 @@ use sqssh_core::config::ServerConfig;
 use sqssh_core::keys;
 use sqssh_core::protocol::{self, ChannelMsg, ChannelType, ControlMsg, CtlRequest, CtlResponse};
 use sqssh_core::stream::{Channel, ControlChannel};
-use tokio::sync::RwLock;
+use tokio::signal::unix::{signal, SignalKind};
+use tokio::sync::{watch, RwLock};
+use tokio::task::JoinSet;
+use tracing::Instrument;
 
 mod file_handler;
 mod pty_handler;
@@ -41,6 +45,18 @@ struct Cli {
     /// Show the server's public key and exit
     #[arg(long = "show-pubkey")]
     show_pubkey: bool,
+
+    /// Log level (trace, debug, info, warn, error)
+    #[arg(long = "log-level", default_value = "info")]
+    log_level: String,
+
+    /// Log to file instead of stderr
+    #[arg(long = "log-file")]
+    log_file: Option<PathBuf>,
+
+    /// Output logs as JSON
+    #[arg(long = "log-json")]
+    log_json: bool,
 }
 
 /// Shared server state passed to connection handlers.
@@ -49,6 +65,7 @@ struct ServerState {
     auth_mode: AuthMode,
     ak_relative: String,
     listener: squic::ServerListener,
+    shutdown_rx: watch::Receiver<bool>,
 }
 
 /// Convert an Ed25519 pubkey to X25519 bytes for the squic whitelist.
@@ -58,10 +75,42 @@ fn ed25519_to_x25519(ed_pub: &[u8; 32]) -> Option<[u8; 32]> {
         .map(|xpub| xpub.to_bytes())
 }
 
+fn init_logging(cli: &Cli) {
+    use tracing_subscriber::EnvFilter;
+
+    let filter = EnvFilter::try_new(&cli.log_level)
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+
+    if cli.log_json {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_target(true)
+            .json()
+            .init();
+    } else if let Some(ref log_file) = cli.log_file {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_file)
+            .expect("failed to open log file");
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_target(true)
+            .with_writer(file)
+            .with_ansi(false)
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_target(true)
+            .init();
+    }
+}
+
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt::init();
     let cli = Cli::parse();
+    init_logging(&cli);
 
     if let Err(e) = run(cli).await {
         eprintln!("error: {e}");
@@ -109,7 +158,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         AuthorizedKeys::load_all_users(&server_config.authorized_keys_file)?;
     let ak_pubkeys = authorized_keys.all_pubkeys();
 
-    eprintln!(
+    tracing::info!(
         "loaded {} authorized key(s) from system users",
         ak_pubkeys.len()
     );
@@ -125,7 +174,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let squic_config = squic::Config {
         alpn_protocols: vec![protocol::ALPN.to_vec()],
-        keep_alive: Some(std::time::Duration::from_secs(15)),
+        keep_alive: Some(Duration::from_secs(15)),
         allowed_keys: if server_config.auth_mode != AuthMode::OpenAndUser {
             Some(whitelist_keys.clone())
         } else {
@@ -136,40 +185,101 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let listener = squic::listen(addr, &signing_key, squic_config).await?;
     let local_addr = listener.local_addr()?;
-    eprintln!("sqsshd listening on {local_addr} (UDP)");
-    eprintln!("server pubkey: {}", keys::encode_pubkey(&verifying_key));
-    eprintln!("auth mode: {:?}", server_config.auth_mode);
+    tracing::info!("sqsshd listening on {local_addr} (UDP)");
+    tracing::info!("server pubkey: {}", keys::encode_pubkey(&verifying_key));
+    tracing::info!("auth mode: {:?}", server_config.auth_mode);
+
+    // Shutdown coordination
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     let state = Arc::new(ServerState {
         authorized_keys: RwLock::new(authorized_keys),
         auth_mode: server_config.auth_mode,
         ak_relative: server_config.authorized_keys_file.clone(),
         listener,
+        shutdown_rx: shutdown_rx.clone(),
     });
 
     // Spawn control socket listener
     let ctl_state = state.clone();
     let ctl_socket_path = server_config.control_socket.clone();
+    let mut ctl_shutdown_rx = shutdown_rx.clone();
     tokio::spawn(async move {
-        if let Err(e) = run_control_socket(&ctl_socket_path, &ctl_state).await {
+        if let Err(e) = run_control_socket(&ctl_socket_path, &ctl_state, &mut ctl_shutdown_rx).await
+        {
             tracing::error!("control socket error: {e}");
         }
     });
 
-    loop {
-        let incoming = match state.listener.accept().await {
-            Some(incoming) => incoming,
-            None => break,
-        };
+    // Signal handlers
+    let mut sigterm = signal(SignalKind::terminate())?;
+    let mut sigint = signal(SignalKind::interrupt())?;
 
-        let state = state.clone();
-        tokio::spawn(async move {
-            if let Err(e) = handle_connection(incoming, &state).await {
-                tracing::error!("connection error: {e}");
+    // Connection task tracker
+    let mut tasks: JoinSet<()> = JoinSet::new();
+
+    loop {
+        tokio::select! {
+            incoming = state.listener.accept() => {
+                let incoming = match incoming {
+                    Some(i) => i,
+                    None => break,
+                };
+
+                let state = state.clone();
+                tasks.spawn(async move {
+                    // Determine remote address for span (from Incoming metadata)
+                    let remote = incoming.remote_address();
+                    let span = tracing::info_span!("conn", remote = %remote);
+                    async {
+                        if let Err(e) = handle_connection(incoming, &state).await {
+                            tracing::error!("connection error: {e}");
+                        }
+                    }
+                    .instrument(span)
+                    .await;
+                });
             }
-        });
+            _ = sigterm.recv() => {
+                tracing::info!("received SIGTERM, shutting down");
+                break;
+            }
+            _ = sigint.recv() => {
+                tracing::info!("received SIGINT, shutting down");
+                break;
+            }
+            // Reap completed tasks
+            Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
+        }
     }
 
+    // Signal shutdown to all handlers
+    shutdown_tx.send(true).ok();
+
+    // Close the listener to stop new connections
+    state
+        .listener
+        .close(quinn::VarInt::from_u32(0), b"server shutting down");
+
+    // Wait for active tasks with timeout
+    if !tasks.is_empty() {
+        tracing::info!(
+            "waiting for {} active connection(s) to finish...",
+            tasks.len()
+        );
+        let drain = async {
+            while tasks.join_next().await.is_some() {}
+        };
+        match tokio::time::timeout(Duration::from_secs(30), drain).await {
+            Ok(()) => tracing::info!("all connections drained"),
+            Err(_) => tracing::warn!("shutdown timeout, {} task(s) abandoned", tasks.len()),
+        }
+    }
+
+    // Clean up control socket
+    std::fs::remove_file(&server_config.control_socket).ok();
+
+    tracing::info!("sqsshd shutdown complete");
     Ok(())
 }
 
@@ -178,6 +288,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 async fn run_control_socket(
     path: &Path,
     state: &ServerState,
+    shutdown_rx: &mut watch::Receiver<bool>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Create parent directory
     if let Some(parent) = path.parent() {
@@ -192,14 +303,24 @@ async fn run_control_socket(
     // Allow any user to connect (peer_cred enforces per-user access)
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666))?;
 
-    eprintln!("control socket: {}", path.display());
+    tracing::info!("control socket: {}", path.display());
 
     loop {
-        let (stream, _) = ctl_listener.accept().await?;
-        if let Err(e) = handle_ctl_connection(stream, state).await {
-            tracing::error!("control connection error: {e}");
+        tokio::select! {
+            result = ctl_listener.accept() => {
+                let (stream, _) = result?;
+                if let Err(e) = handle_ctl_connection(stream, state).await {
+                    tracing::error!("control connection error: {e}");
+                }
+            }
+            _ = shutdown_rx.changed() => {
+                tracing::debug!("control socket shutting down");
+                break;
+            }
         }
     }
+
+    Ok(())
 }
 
 async fn handle_ctl_connection(
@@ -224,9 +345,7 @@ async fn handle_ctl_connection(
         .map_err(|e| format!("invalid request: {e}"))?;
 
     let response = match request {
-        CtlRequest::ReloadKeys => {
-            reload_user_keys(state, peer_uid).await
-        }
+        CtlRequest::ReloadKeys => reload_user_keys(state, peer_uid).await,
         CtlRequest::ReloadAllKeys => {
             if peer_uid != 0 {
                 CtlResponse::Error {
@@ -248,7 +367,6 @@ async fn handle_ctl_connection(
 }
 
 async fn reload_user_keys(state: &ServerState, uid: u32) -> CtlResponse {
-    // Look up username from UID
     let username = match nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid)) {
         Ok(Some(user)) => user.name,
         Ok(None) => {
@@ -273,20 +391,15 @@ async fn reload_user_keys(state: &ServerState, uid: u32) -> CtlResponse {
     };
 
     let ak_path = PathBuf::from(&home).join(&state.ak_relative);
-
     let mut ak = state.authorized_keys.write().await;
-
-    // Get old keys for this user (for whitelist diff)
     let old_pubkeys: Vec<[u8; 32]> = ak.all_pubkeys();
 
-    // Reload this user's keys
     if let Err(e) = ak.reload_user(&username, uid, &ak_path) {
         return CtlResponse::Error {
             message: format!("failed to reload keys for '{username}': {e}"),
         };
     }
 
-    // Compute new full set and update whitelist
     let new_pubkeys = ak.all_pubkeys();
     update_whitelist(state, &old_pubkeys, &new_pubkeys);
 
@@ -321,14 +434,13 @@ async fn reload_all_keys(state: &ServerState) -> CtlResponse {
 
 fn update_whitelist(state: &ServerState, old_keys: &[[u8; 32]], new_keys: &[[u8; 32]]) {
     if state.auth_mode == AuthMode::OpenAndUser {
-        return; // No whitelist in open mode
+        return;
     }
 
     use std::collections::HashSet;
     let old_set: HashSet<[u8; 32]> = old_keys.iter().copied().collect();
     let new_set: HashSet<[u8; 32]> = new_keys.iter().copied().collect();
 
-    // Remove keys no longer present
     for key in old_set.difference(&new_set) {
         if let Some(x25519) = ed25519_to_x25519(key) {
             state.listener.remove_key(&x25519);
@@ -336,7 +448,6 @@ fn update_whitelist(state: &ServerState, old_keys: &[[u8; 32]], new_keys: &[[u8;
         }
     }
 
-    // Add new keys
     for key in new_set.difference(&old_set) {
         if let Some(x25519) = ed25519_to_x25519(key) {
             state.listener.allow_key(&x25519);
@@ -353,7 +464,7 @@ async fn handle_connection(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let conn = incoming.await?;
     let remote = conn.remote_address();
-    tracing::info!("new connection from {remote}");
+    tracing::info!("connected");
 
     // Accept control channel (stream 0)
     let mut control = ControlChannel::accept(&conn).await?;
@@ -363,7 +474,7 @@ async fn handle_connection(
         ControlMsg::AuthRequest {
             username, pubkey, ..
         } => {
-            tracing::info!("auth request from user '{username}'");
+            tracing::info!(user = %username, "auth request");
             let pubkey_bytes: [u8; 32] = pubkey
                 .try_into()
                 .map_err(|_| "invalid pubkey length")?;
@@ -382,7 +493,7 @@ async fn handle_connection(
                 .map_err(|_| "invalid ed25519 pubkey")?;
             let ak = state.authorized_keys.read().await;
             if !ak.is_authorized(&vk, &username) {
-                tracing::warn!("auth rejected: pubkey not authorized for user '{username}'");
+                tracing::warn!(user = %username, "auth rejected");
                 control
                     .send(&ControlMsg::AuthFailure {
                         message: "pubkey not authorized for this user".into(),
@@ -391,13 +502,11 @@ async fn handle_connection(
                 return Ok(());
             }
         }
-        AuthMode::WhitelistOnly => {
-            // Client already passed squic whitelist — no user check needed
-        }
+        AuthMode::WhitelistOnly => {}
     }
 
     control.send(&ControlMsg::AuthSuccess).await?;
-    tracing::info!("auth success for '{username}'");
+    tracing::info!(user = %username, "auth success");
 
     // Handle channel requests
     loop {
@@ -411,35 +520,40 @@ async fn handle_connection(
                 channel.confirm().await?;
                 let user = username.clone();
                 let remote_host = remote.ip().to_string();
-                tokio::spawn(async move {
-                    if let Err(e) = handle_session(channel, &user, &remote_host).await {
-                        tracing::error!("session error: {e}");
+                tokio::spawn(
+                    async move {
+                        if let Err(e) = handle_session(channel, &user, &remote_host).await {
+                            tracing::error!("session error: {e}");
+                        }
                     }
-                });
+                    .in_current_span(),
+                );
             }
             ChannelType::FileTransfer { direction, path } => {
                 channel.confirm().await?;
                 let user = username.clone();
-                tokio::spawn(async move {
-                    let result = match direction {
-                        protocol::TransferDirection::Upload => {
-                            file_handler::handle_upload(&mut channel, &user, &path).await
+                tokio::spawn(
+                    async move {
+                        let result = match direction {
+                            protocol::TransferDirection::Upload => {
+                                file_handler::handle_upload(&mut channel, &user, &path).await
+                            }
+                            protocol::TransferDirection::Download => {
+                                file_handler::handle_download(&mut channel, &user, &path).await
+                            }
+                        };
+                        if let Err(e) = result {
+                            tracing::error!(path = %path, "file transfer error: {e}");
+                            let _ = channel
+                                .send(&ChannelMsg::FileResult {
+                                    success: false,
+                                    message: e.to_string(),
+                                })
+                                .await;
                         }
-                        protocol::TransferDirection::Download => {
-                            file_handler::handle_download(&mut channel, &user, &path).await
-                        }
-                    };
-                    if let Err(e) = result {
-                        tracing::error!("file transfer error for '{path}': {e}");
-                        // Try to send error back to client
-                        let _ = channel
-                            .send(&ChannelMsg::FileResult {
-                                success: false,
-                                message: e.to_string(),
-                            })
-                            .await;
                     }
-                });
+                    .in_current_span(),
+                );
             }
             other => {
                 tracing::warn!("unsupported channel type: {other:?}");
@@ -448,7 +562,7 @@ async fn handle_connection(
         }
     }
 
-    tracing::info!("connection from {remote} closed");
+    tracing::info!("disconnected");
     Ok(())
 }
 
@@ -478,6 +592,7 @@ async fn handle_session(
                 break;
             }
             ChannelMsg::ExecRequest { command } => {
+                tracing::debug!(cmd = %command, "exec request");
                 pty_handler::run_exec(&mut channel, username, &command).await?;
                 return Ok(());
             }
@@ -487,6 +602,5 @@ async fn handle_session(
         }
     }
 
-    // Spawn shell with PTY
     pty_handler::run_shell(&mut channel, username, remote_host, &term, cols, rows).await
 }

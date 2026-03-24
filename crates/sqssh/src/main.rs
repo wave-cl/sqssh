@@ -25,12 +25,23 @@ struct Cli {
     /// Identity file (private key)
     #[arg(short = 'i', long)]
     identity: Option<PathBuf>,
+
+    /// Verbose mode (enables debug logging)
+    #[arg(short = 'v', long)]
+    verbose: bool,
 }
 
 #[tokio::main]
 async fn main() {
-    tracing_subscriber::fmt::init();
     let cli = Cli::parse();
+
+    let level = if cli.verbose { "debug" } else { "warn" };
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_new(level).unwrap_or_default(),
+        )
+        .with_target(false)
+        .init();
 
     if let Err(e) = run(cli).await {
         eprintln!("sqssh: {e}");
