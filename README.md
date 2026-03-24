@@ -213,6 +213,16 @@ SQSSH-ED25519-ENCRYPTED-KEY
 
 Passphrase-protected keys use argon2id (KDF) + chacha20-poly1305 (AEAD). Generate with `sqssh-keygen` — it prompts for a passphrase (leave empty for no encryption). Encrypted keys are auto-detected on load and prompt for the passphrase.
 
+Key map (`~/.sqssh/key_map`) — auto-populated on successful connect:
+
+```
+167.235.197.87 id_ed25519
+prod.example.com work_key
+dev.internal id_ed25519
+```
+
+Maps hosts to key names (relative to `~/.sqssh/`). Created automatically — no manual editing needed. Also updated by `sqssh-copy-id` when deploying keys.
+
 Known hosts (`~/.sqssh/known_hosts`):
 
 ```
