@@ -18,6 +18,7 @@ use tracing::Instrument;
 
 mod file_handler;
 mod pty_handler;
+mod sftp_handler;
 
 #[derive(Parser)]
 #[command(name = "sqsshd", about = "sqssh server daemon")]
@@ -585,6 +586,18 @@ async fn handle_connection(
                                     message: e.to_string(),
                                 })
                                 .await;
+                        }
+                    }
+                    .in_current_span(),
+                );
+            }
+            ChannelType::Sftp => {
+                channel.confirm().await?;
+                let user = username.clone();
+                tokio::spawn(
+                    async move {
+                        if let Err(e) = sftp_handler::handle_sftp(&mut channel, &user).await {
+                            tracing::error!("sftp error: {e}");
                         }
                     }
                     .in_current_span(),

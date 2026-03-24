@@ -41,6 +41,16 @@ const MSG_EXIT_SIGNAL: u8 = 0x63;
 const MSG_FILE_HEADER: u8 = 0x80;
 const MSG_FILE_RESULT: u8 = 0x81;
 const MSG_FILE_MANIFEST: u8 = 0x82;
+const MSG_SFTP_LIST_DIR: u8 = 0x90;
+const MSG_SFTP_STAT: u8 = 0x91;
+const MSG_SFTP_MKDIR: u8 = 0x92;
+const MSG_SFTP_REMOVE: u8 = 0x93;
+const MSG_SFTP_RENAME: u8 = 0x94;
+const MSG_SFTP_REALPATH: u8 = 0x95;
+const MSG_SFTP_DIR_LISTING: u8 = 0x96;
+const MSG_SFTP_STAT_RESULT: u8 = 0x97;
+const MSG_SFTP_OK: u8 = 0x98;
+const MSG_SFTP_ERROR: u8 = 0x99;
 const MSG_EOF: u8 = 0x70;
 const MSG_CLOSE: u8 = 0x71;
 
@@ -106,6 +116,7 @@ pub enum ChannelType {
         direction: TransferDirection,
         path: String,
     },
+    Sftp,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,6 +179,44 @@ pub enum ChannelMsg {
     },
     FileManifest {
         entries: Vec<ManifestEntry>,
+    },
+    // -- SFTP interactive commands --
+    SftpListDir {
+        path: String,
+    },
+    SftpStat {
+        path: String,
+    },
+    SftpMkdir {
+        path: String,
+        mode: u32,
+    },
+    SftpRemove {
+        path: String,
+    },
+    SftpRename {
+        old_path: String,
+        new_path: String,
+    },
+    SftpRealpath {
+        path: String,
+    },
+    SftpDirListing {
+        entries: Vec<ManifestEntry>,
+    },
+    SftpStatResult {
+        path: String,
+        size: u64,
+        mode: u32,
+        mtime: u64,
+        atime: u64,
+        is_dir: bool,
+    },
+    SftpOk {
+        message: String,
+    },
+    SftpError {
+        message: String,
     },
     Eof,
     Close,
@@ -249,6 +298,16 @@ impl ChannelMsg {
             Self::FileHeader { .. } => MSG_FILE_HEADER,
             Self::FileResult { .. } => MSG_FILE_RESULT,
             Self::FileManifest { .. } => MSG_FILE_MANIFEST,
+            Self::SftpListDir { .. } => MSG_SFTP_LIST_DIR,
+            Self::SftpStat { .. } => MSG_SFTP_STAT,
+            Self::SftpMkdir { .. } => MSG_SFTP_MKDIR,
+            Self::SftpRemove { .. } => MSG_SFTP_REMOVE,
+            Self::SftpRename { .. } => MSG_SFTP_RENAME,
+            Self::SftpRealpath { .. } => MSG_SFTP_REALPATH,
+            Self::SftpDirListing { .. } => MSG_SFTP_DIR_LISTING,
+            Self::SftpStatResult { .. } => MSG_SFTP_STAT_RESULT,
+            Self::SftpOk { .. } => MSG_SFTP_OK,
+            Self::SftpError { .. } => MSG_SFTP_ERROR,
             Self::Eof => MSG_EOF,
             Self::Close => MSG_CLOSE,
         }
