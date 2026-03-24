@@ -62,10 +62,10 @@ Escape sequences: `~.` disconnect, `~?` help, `~~` literal tilde. Auto-reconnect
 sqscp localfile.txt user@host:/remote/path
 sqscp user@host:/remote/file.txt ./
 sqscp -r -j 16 ./project/ user@host:~/backup/
-sqscp -P -l 1000 largefile.bin user@host:/tmp/
+sqscp -p -l 1000 largefile.bin user@host:/tmp/
 ```
 
-Flags: `-r` recursive, `-j N` concurrent streams (default 8), `-P` preserve timestamps, `-l KB/s` bandwidth limit, `-q` quiet, `-v` verbose.
+Flags: `-r` recursive, `-j N` concurrent streams (default 8), `-p` preserve timestamps, `-P port` UDP port, `-l KB/s` bandwidth limit, `-q` quiet, `-v` verbose.
 
 ### Run the server
 

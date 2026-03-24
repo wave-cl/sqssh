@@ -21,7 +21,7 @@ struct Cli {
     args: Vec<String>,
 
     /// Port (UDP)
-    #[arg(short = 'p', long)]
+    #[arg(short = 'P', long)]
     port: Option<u16>,
 
     /// Identity file (private key)
@@ -33,7 +33,7 @@ struct Cli {
     recursive: bool,
 
     /// Preserve modification times
-    #[arg(short = 'P', long = "preserve")]
+    #[arg(short = 'p', long = "preserve")]
     preserve: bool,
 
     /// Max concurrent transfers
