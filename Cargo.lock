@@ -1483,6 +1483,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "clap",
+ "ed25519-dalek",
  "libc",
  "nix",
  "quinn",

@@ -146,13 +146,13 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Interactive shell with auto-reconnect (handled inside)
-    run_interactive_shell(&mut channel, &conn).await
+    run_interactive_shell(&mut channel, &conn, &signing_key).await
 }
 
 async fn reconnect_shell(
     stdin_rx: &mut tokio::sync::mpsc::Receiver<Vec<u8>>,
+    cached_key: &ed25519_dalek::SigningKey,
 ) -> Result<i32, Box<dyn std::error::Error>> {
-    // Re-read CLI args from the process args
     let cli = Cli::parse();
     let (user, host) = parse_destination(&cli.destination)?;
     let sqssh_dir = keys::sqssh_dir()?;
@@ -179,12 +179,8 @@ async fn reconnect_shell(
         .next()
         .ok_or("could not resolve address")?;
 
-    let identity_path = cli
-        .identity
-        .clone()
-        .or(resolved.identity_file.map(PathBuf::from))
-        .unwrap_or_else(|| sqssh_dir.join("id_ed25519"));
-    let signing_key = keys::load_private_key(&identity_path)?;
+    // Use cached key — no file re-read, no passphrase prompt
+    let signing_key = cached_key.clone();
     let verifying_key = signing_key.verifying_key();
 
     let client_key_hex = signing_key
@@ -303,6 +299,7 @@ fn spawn_stdin_reader() -> tokio::sync::mpsc::Receiver<Vec<u8>> {
 async fn run_interactive_shell(
     channel: &mut Channel,
     conn: &quinn::Connection,
+    cached_key: &ed25519_dalek::SigningKey,
 ) -> Result<(), Box<dyn std::error::Error>> {
     start_shell_session(channel).await?;
 
@@ -341,7 +338,7 @@ async fn run_interactive_shell(
                     tokio::time::sleep(delay).await;
                     attempt += 1;
 
-                    match reconnect_shell(&mut stdin_rx).await {
+                    match reconnect_shell(&mut stdin_rx, cached_key).await {
                         Ok(code) => std::process::exit(code),
                         Err(_) => {
                             eprint!(".");

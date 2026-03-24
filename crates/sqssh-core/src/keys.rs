@@ -348,6 +348,65 @@ pub fn ensure_sqssh_dir() -> Result<std::path::PathBuf> {
     Ok(dir)
 }
 
+/// Load the key_map file (~/.sqssh/key_map).
+/// Returns a map of hostname → key name (relative to ~/.sqssh/).
+pub fn load_key_map() -> std::collections::HashMap<String, String> {
+    use std::collections::HashMap;
+
+    let mut map = HashMap::new();
+    let path = match sqssh_dir() {
+        Ok(d) => d.join("key_map"),
+        Err(_) => return map,
+    };
+
+    let content = match fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return map,
+    };
+
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.splitn(2, char::is_whitespace);
+        if let (Some(host), Some(key_name)) = (parts.next(), parts.next()) {
+            map.insert(host.to_string(), key_name.trim().to_string());
+        }
+    }
+
+    map
+}
+
+/// Save a host → key mapping to ~/.sqssh/key_map.
+pub fn save_key_mapping(host: &str, key_name: &str) -> Result<()> {
+    let dir = sqssh_dir()?;
+    let path = dir.join("key_map");
+
+    let mut map = load_key_map();
+    map.insert(host.to_string(), key_name.to_string());
+
+    let mut content = String::new();
+    for (h, k) in &map {
+        content.push_str(&format!("{h} {k}\n"));
+    }
+    fs::write(&path, content)?;
+    Ok(())
+}
+
+/// Look up which key to use for a host from the key_map.
+pub fn key_for_host(host: &str) -> Option<std::path::PathBuf> {
+    let map = load_key_map();
+    let key_name = map.get(host)?;
+    let dir = sqssh_dir().ok()?;
+    let path = dir.join(key_name);
+    if path.exists() {
+        Some(path)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -116,8 +116,20 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     if output.contains("KEY_EXISTS") {
         eprintln!("key already present on {host}");
+        // Save key mapping even if already present
+        let key_name = pub_key_path
+            .file_stem()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "id_ed25519".into());
+        keys::save_key_mapping(&host, &key_name).ok();
     } else if output.contains("KEY_ADDED") {
         eprintln!("key added to {host}:~/.sqssh/authorized_keys");
+        // Auto-map this key for future connections
+        let key_name = pub_key_path
+            .file_stem()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "id_ed25519".into());
+        keys::save_key_mapping(&host, &key_name).ok();
     } else {
         eprintln!("unexpected output: {output}");
         if exit_code != 0 {

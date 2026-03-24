@@ -46,6 +46,8 @@ pub fn parse_remote(s: &str) -> Option<RemoteSpec> {
 pub struct Connection {
     pub conn: quinn::Connection,
     pub username: String,
+    /// The key that succeeded auth (cached for reconnects).
+    pub signing_key: ed25519_dalek::SigningKey,
 }
 
 /// Connect to a remote sqsshd, authenticate, and return the connection.
@@ -83,33 +85,42 @@ pub async fn connect(
         .next()
         .ok_or_else(|| Error::Connection(format!("could not resolve {actual_host}:{port}")))?;
 
-    // Load identity key — try agent first, then file
-    let (signing_key, verifying_key) = if identity.is_none() {
-        // No explicit identity — try agent
-        match try_agent_key() {
-            Some((sk, vk)) => {
-                tracing::debug!("using key from agent");
-                (sk, vk)
-            }
-            None => {
-                let path = resolved
-                    .identity_file
-                    .as_ref()
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| sqssh_dir.join("id_ed25519"));
-                let sk = keys::load_private_key(&path)?;
-                let vk = sk.verifying_key();
-                (sk, vk)
-            }
-        }
-    } else {
-        let path = identity
-            .map(PathBuf::from)
-            .or(resolved.identity_file.map(PathBuf::from))
-            .unwrap_or_else(|| sqssh_dir.join("id_ed25519"));
+    // Key resolution chain:
+    // 1. Explicit -i flag
+    // 2. IdentityFile from config
+    // 3. Agent
+    // 4. Learned key_map for this host
+    // 5. Default ~/.sqssh/id_ed25519
+    // Key name for key_map (relative to ~/.sqssh/)
+    let (signing_key, verifying_key, key_name) = if let Some(id_path) = identity {
+        let path = PathBuf::from(id_path);
+        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         let sk = keys::load_private_key(&path)?;
         let vk = sk.verifying_key();
-        (sk, vk)
+        tracing::debug!("using explicit identity: {}", path.display());
+        (sk, vk, name)
+    } else if let Some(ref config_id) = resolved.identity_file {
+        let path = PathBuf::from(config_id);
+        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let sk = keys::load_private_key(&path)?;
+        let vk = sk.verifying_key();
+        tracing::debug!("using config IdentityFile: {}", path.display());
+        (sk, vk, name)
+    } else if let Some((sk, vk)) = try_agent_key() {
+        tracing::debug!("using key from agent");
+        (sk, vk, String::new()) // agent keys don't map to a file
+    } else if let Some(mapped_path) = keys::key_for_host(host) {
+        let name = mapped_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let sk = keys::load_private_key(&mapped_path)?;
+        let vk = sk.verifying_key();
+        tracing::debug!("using key_map: {}", mapped_path.display());
+        (sk, vk, name)
+    } else {
+        let path = sqssh_dir.join("id_ed25519");
+        let sk = keys::load_private_key(&path)?;
+        let vk = sk.verifying_key();
+        tracing::debug!("using default key");
+        (sk, vk, "id_ed25519".into())
     };
 
     // Connect via squic
@@ -139,7 +150,12 @@ pub async fn connect(
         .await?;
 
     match control.recv().await? {
-        ControlMsg::AuthSuccess => {}
+        ControlMsg::AuthSuccess => {
+            // Auto-learn: save which key worked for this host
+            if !key_name.is_empty() {
+                keys::save_key_mapping(host, &key_name).ok();
+            }
+        }
         ControlMsg::AuthFailure { message } => {
             return Err(Error::Auth(format!("authentication failed: {message}")));
         }
@@ -148,7 +164,11 @@ pub async fn connect(
         }
     }
 
-    Ok(Connection { conn, username })
+    Ok(Connection {
+        conn,
+        username,
+        signing_key,
+    })
 }
 
 /// Try to get a key from the running sqssh-agent.
