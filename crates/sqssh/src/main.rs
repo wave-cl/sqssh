@@ -7,7 +7,7 @@ use sqssh_core::keys;
 use sqssh_core::known_hosts::KnownHosts;
 use sqssh_core::protocol::{self, ChannelMsg, ChannelType, ControlMsg};
 use sqssh_core::stream::{Channel, ControlChannel};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 
 #[derive(Parser)]
 #[command(name = "sqssh", about = "sqssh remote shell client")]
@@ -79,10 +79,16 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let signing_key = keys::load_private_key(&identity_path)?;
     let verifying_key = signing_key.verifying_key();
 
-    // Connect via squic
+    // Connect via squic with client identity for whitelist auth
+    let client_key_hex = signing_key
+        .to_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<String>();
     let squic_config = squic::Config {
         alpn_protocols: vec![protocol::ALPN.to_vec()],
         keep_alive: Some(std::time::Duration::from_secs(resolved.keepalive_interval)),
+        client_key: Some(client_key_hex),
         ..Default::default()
     };
 
@@ -160,12 +166,31 @@ async fn run_interactive_shell(
     // Set local terminal to raw mode
     let orig_termios = set_raw_mode()?;
 
+    // Ignore SIGINT/SIGQUIT — raw mode sends Ctrl+C/Ctrl+\ as data to the
+    // remote side; the default signal handlers must not kill us locally.
+    unsafe {
+        libc::signal(libc::SIGINT, libc::SIG_IGN);
+        libc::signal(libc::SIGQUIT, libc::SIG_IGN);
+    }
+
     let result = relay_stdio(channel).await;
 
-    // Restore terminal
+    // Restore terminal and signal handlers
+    unsafe {
+        libc::signal(libc::SIGINT, libc::SIG_DFL);
+        libc::signal(libc::SIGQUIT, libc::SIG_DFL);
+    }
     restore_terminal(&orig_termios);
 
-    result
+    // Exit immediately — the blocking stdin reader thread would otherwise
+    // keep the process alive until the next keypress.
+    match result {
+        Ok(code) => std::process::exit(code),
+        Err(e) => {
+            eprintln!("sqssh: {e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 async fn run_remote_command(
@@ -206,26 +231,33 @@ async fn run_remote_command(
     Ok(())
 }
 
-async fn relay_stdio(channel: &mut Channel) -> Result<(), Box<dyn std::error::Error>> {
-    let mut stdin = tokio::io::stdin();
-    let mut stdin_buf = vec![0u8; 4096];
-    let mut exit_code = 0u32;
+async fn relay_stdio(channel: &mut Channel) -> Result<i32, Box<dyn std::error::Error>> {
+    let mut exit_code = 0i32;
+
+    // Spawn stdin reader on a blocking thread so it doesn't hold up the
+    // select loop — tokio::io::stdin().read() is not cancellation-safe and
+    // will block until data arrives, preventing us from seeing channel close.
+    let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(16);
+    tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        let mut buf = vec![0u8; 4096];
+        loop {
+            match std::io::stdin().read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if stdin_tx.blocking_send(buf[..n].to_vec()).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
 
     loop {
         tokio::select! {
-            // stdin → channel
-            n = stdin.read(&mut stdin_buf) => {
-                let n = n?;
-                if n == 0 {
-                    channel.send(&ChannelMsg::Eof).await?;
-                    continue;
-                }
-                channel.send(&ChannelMsg::Data {
-                    payload: stdin_buf[..n].to_vec(),
-                }).await?;
-            }
+            biased;
 
-            // channel → stdout
+            // channel → stdout (check first so we see close promptly)
             msg = channel.recv() => {
                 match msg? {
                     ChannelMsg::Data { payload } => {
@@ -239,20 +271,29 @@ async fn relay_stdio(channel: &mut Channel) -> Result<(), Box<dyn std::error::Er
                         stderr.flush().await?;
                     }
                     ChannelMsg::ExitStatus { code } => {
-                        exit_code = code;
+                        exit_code = code as i32;
                     }
                     ChannelMsg::Eof | ChannelMsg::Close => break,
                     ChannelMsg::WindowChange { .. } => {}
                     _ => {}
                 }
             }
+
+            // stdin → channel
+            data = stdin_rx.recv() => {
+                match data {
+                    Some(payload) => {
+                        channel.send(&ChannelMsg::Data { payload }).await?;
+                    }
+                    None => {
+                        channel.send(&ChannelMsg::Eof).await?;
+                    }
+                }
+            }
         }
     }
 
-    if exit_code != 0 {
-        std::process::exit(exit_code as i32);
-    }
-    Ok(())
+    Ok(exit_code)
 }
 
 fn parse_destination(dest: &str) -> Result<(Option<String>, String), Box<dyn std::error::Error>> {

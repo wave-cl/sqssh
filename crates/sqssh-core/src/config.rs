@@ -1,7 +1,7 @@
-use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
+use crate::auth::AuthMode;
 use crate::error::{Error, Result};
 use crate::protocol::DEFAULT_PORT;
 
@@ -319,6 +319,89 @@ fn parse_host_port(s: &str) -> Result<(Option<String>, u16)> {
             .parse()
             .map_err(|_| Error::Config(format!("invalid port: {s}")))?;
         Ok((None, port))
+    }
+}
+
+/// Server configuration parsed from /etc/sqssh/sqsshd.conf.
+#[derive(Debug, Clone)]
+pub struct ServerConfig {
+    pub listen_address: String,
+    pub port: u16,
+    pub host_key: PathBuf,
+    pub auth_mode: AuthMode,
+    pub authorized_keys_file: String,
+    pub max_sessions: usize,
+    pub control_socket: PathBuf,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            listen_address: "0.0.0.0".into(),
+            port: DEFAULT_PORT,
+            host_key: PathBuf::from("/etc/sqssh/host_key"),
+            auth_mode: AuthMode::WhitelistAndUser,
+            authorized_keys_file: ".sqssh/authorized_keys".into(),
+            max_sessions: 64,
+            control_socket: PathBuf::from("/run/sqssh/control.sock"),
+        }
+    }
+}
+
+impl ServerConfig {
+    /// Load configuration from a file. Returns default config if file doesn't exist.
+    pub fn load(path: &Path) -> Result<Self> {
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let content = fs::read_to_string(path)?;
+        Self::parse(&content)
+    }
+
+    /// Parse configuration from a string.
+    pub fn parse(content: &str) -> Result<Self> {
+        let mut config = Self::default();
+
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            let (key, value) = split_directive(line)?;
+
+            match key.to_ascii_lowercase().as_str() {
+                "listenaddress" => config.listen_address = value.to_string(),
+                "port" => {
+                    config.port = value
+                        .parse()
+                        .map_err(|_| Error::Config(format!("invalid port: {value}")))?;
+                }
+                "hostkey" => config.host_key = PathBuf::from(value),
+                "authmode" => {
+                    config.auth_mode = match value.to_lowercase().as_str() {
+                        "whitelist+user" => AuthMode::WhitelistAndUser,
+                        "whitelist-only" => AuthMode::WhitelistOnly,
+                        "open+user" => AuthMode::OpenAndUser,
+                        _ => {
+                            return Err(Error::Config(format!("invalid auth mode: {value}")));
+                        }
+                    };
+                }
+                "authorizedkeysfile" => config.authorized_keys_file = value.to_string(),
+                "maxsessions" => {
+                    config.max_sessions = value
+                        .parse()
+                        .map_err(|_| Error::Config(format!("invalid max sessions: {value}")))?;
+                }
+                "controlsocket" => config.control_socket = PathBuf::from(value),
+                _ => {
+                    tracing::warn!("unknown server config directive: {key}");
+                }
+            }
+        }
+
+        Ok(config)
     }
 }
 

@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use ed25519_dalek::VerifyingKey;
 
-use crate::error::{Error, Result};
-use crate::keys::{decode_pubkey, encode_pubkey, parse_public_key_line};
+use crate::error::Result;
+use crate::keys::parse_public_key_line;
 
 /// Server authentication mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,8 +33,8 @@ pub struct AuthorizedEntry {
 }
 
 impl AuthorizedKeys {
-    /// Load authorized_keys for a specific user from their file.
-    pub fn load_for_user(username: &str, path: &Path) -> Result<Vec<VerifyingKey>> {
+    /// Load authorized_keys from a file, returning (key, comment) pairs.
+    pub fn load_file(path: &Path) -> Result<Vec<(VerifyingKey, String)>> {
         if !path.exists() {
             return Ok(Vec::new());
         }
@@ -48,12 +48,62 @@ impl AuthorizedKeys {
                 continue;
             }
             match parse_public_key_line(line) {
-                Ok((key, _comment)) => keys.push(key),
+                Ok((key, comment)) => keys.push((key, comment)),
                 Err(e) => tracing::warn!("skipping invalid authorized_keys entry: {e}"),
             }
         }
 
         Ok(keys)
+    }
+
+    /// Scan all system users and load their authorized_keys files.
+    /// `ak_relative` is the path relative to each user's home dir (e.g. ".sqssh/authorized_keys").
+    pub fn load_all_users(ak_relative: &str) -> Result<Self> {
+        let mut ak = Self::default();
+
+        let passwd = fs::read_to_string("/etc/passwd")?;
+        for line in passwd.lines() {
+            let fields: Vec<&str> = line.split(':').collect();
+            if fields.len() < 6 {
+                continue;
+            }
+            let username = fields[0];
+            let home = fields[5];
+            if home.is_empty() || home == "/nonexistent" || home == "/dev/null" {
+                continue;
+            }
+
+            let ak_path = PathBuf::from(home).join(ak_relative);
+            match Self::load_file(&ak_path) {
+                Ok(keys) if !keys.is_empty() => {
+                    tracing::info!(
+                        "loaded {} authorized key(s) for user '{username}' from {ak_path:?}",
+                        keys.len()
+                    );
+                    ak.add_user_keys(username, &keys);
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::debug!("could not read {ak_path:?}: {e}");
+                }
+            }
+        }
+
+        Ok(ak)
+    }
+
+    /// Reload keys for a single user. Removes old keys for that user first.
+    pub fn reload_user(&mut self, username: &str, ak_path: &Path) -> Result<()> {
+        self.remove_user(username);
+        let keys = Self::load_file(ak_path)?;
+        if !keys.is_empty() {
+            tracing::info!(
+                "reloaded {} key(s) for user '{username}'",
+                keys.len()
+            );
+            self.add_user_keys(username, &keys);
+        }
+        Ok(())
     }
 
     /// Add all keys from a user's authorized_keys file.

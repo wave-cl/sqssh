@@ -1424,6 +1424,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "clap",
+ "ed25519-dalek",
  "libc",
  "nix",
  "quinn",
@@ -1437,7 +1438,7 @@ dependencies = [
 [[package]]
 name = "squic"
 version = "0.1.0"
-source = "git+https://github.com/wave-cl/squic-rust#27146c4a1b289fbc4d0e8c41afb77484fd59838f"
+source = "git+https://github.com/wave-cl/squic-rust#2860d55a1e65447c05e01a4b25a71d6693886200"
 dependencies = [
  "curve25519-dalek",
  "ed25519-dalek",
