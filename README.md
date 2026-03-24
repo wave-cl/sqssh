@@ -27,7 +27,7 @@ Same port number (22), different protocol (UDP instead of TCP). They coexist.
 | `sqssh-add` | ✓ | Add/list/remove keys in agent |
 | `sqssh-copy-id` | ✓ | Deploy public keys to remote hosts |
 | `sqssh-keyscan` | ✓ | Manage known hosts |
-| `sqsftp` | — | SFTP |
+| `sqsftp` | ✓ | Interactive file transfer |
 
 ## Quick start
 
@@ -115,6 +115,25 @@ sqssh-keyscan remove host.example.com
 sqssh-keyscan fingerprint <base58-pubkey>
 ```
 
+### Interactive file transfer
+
+```
+sqsftp user@host
+sftp> ls
+sftp> cd /var/log
+sftp> get syslog
+sftp> put localfile.txt
+sftp> mkdir backups
+sftp> stat file.txt
+sftp> rename old.txt new.txt
+sftp> rm temp.txt
+sftp> lpwd
+sftp> lcd ~/Downloads
+sftp> quit
+```
+
+Uses a persistent command channel for navigation and metadata operations, with separate parallel streams for file transfers (get/put).
+
 ## Authentication
 
 sqssh uses a two-layer authentication model:
@@ -156,7 +175,7 @@ Host *
 
 ### Server directives (`/etc/sqssh/sqsshd.conf`)
 
-`ListenAddress`, `Port`, `HostKey`, `AuthMode`, `AuthorizedKeysFile`, `MaxSessions`, `ControlSocket`
+`ListenAddress`, `Port`, `HostKey`, `AuthMode`, `AuthorizedKeysFile`, `MaxSessions`, `ControlSocket`, `ConnectionMigration`
 
 ## Key format
 
@@ -199,7 +218,6 @@ Binaries are in `target/release/`.
 
 - **Port forwarding** — TCP local (`-L`), TCP remote (`-R`), SOCKS5 dynamic (`-D`), and native UDP forwarding (`-U`). Protocol types already defined.
 - **ProxyJump** — bastion host chaining (`sqssh -J bastion user@target`). Config directive already parsed.
-- **sqsftp** — SFTP-like interactive file transfer subsystem.
 
 ## License
 
