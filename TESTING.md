@@ -485,8 +485,8 @@ echo -e "pwd\nquit" | sqsftp -F /tmp/sqssh_test_config -i /tmp/test_key testhost
 
 ## A11. File and Socket Permissions
 
-> **Note:** A12.3 and A12.4 are destructive — they temporarily modify authorized_keys.
-> This section runs last, just before cleanup.
+> **Note:** A11.3 and A11.4 are destructive — they temporarily modify authorized_keys.
+> This section runs last before the CLI flag tests and cleanup.
 
 ### A11.1 Client-side permissions
 ```
@@ -524,7 +524,278 @@ ssh $SERVER_A "chmod 600 ~/.sqssh/authorized_keys"
 
 ---
 
-## A12. Cleanup (automated)
+## A12. CLI Flag Compatibility
+
+### A12.1 sqssh --version
+```
+sqssh --version
+# Expect: "sqssh 0.1.0" (or current version)
+```
+
+### A12.2 sqssh -l login name
+```
+sqssh -i /tmp/test_key -l root 167.235.197.87 "whoami"
+# Expect: root
+```
+
+### A12.3 sqssh -N no command (hold connection)
+```
+timeout 3 sqssh -i /tmp/test_key -N $SERVER_A 2>&1
+# Expect: exits after timeout, no shell prompt
+```
+
+### A12.4 sqssh -n no stdin
+```
+echo "should not reach" | sqssh -i /tmp/test_key -n $SERVER_A "cat"
+# Expect: cat exits immediately (stdin is /dev/null)
+```
+
+### A12.5 sqssh -q quiet mode
+```
+sqssh -i /tmp/test_key -q $SERVER_A "echo quiet-test" 2>&1
+# Expect: only "quiet-test", no warnings or diagnostics
+```
+
+### A12.6 sqssh stub -L (local forward)
+```
+sqssh -i /tmp/test_key -L 8080:localhost:80 $SERVER_A 2>&1
+echo $?
+# Expect: "sqssh: local port forwarding (-L) is not yet implemented"
+# Exit code: 1
+```
+
+### A12.7 sqssh stub -R (remote forward)
+```
+sqssh -i /tmp/test_key -R 8080:localhost:80 $SERVER_A 2>&1
+echo $?
+# Expect: "sqssh: remote port forwarding (-R) is not yet implemented"
+# Exit code: 1
+```
+
+### A12.8 sqssh stub -D (dynamic forward)
+```
+sqssh -i /tmp/test_key -D 1080 $SERVER_A 2>&1
+echo $?
+# Expect: "sqssh: dynamic port forwarding (-D) is not yet implemented"
+# Exit code: 1
+```
+
+### A12.9 sqssh stub -J (ProxyJump)
+```
+sqssh -i /tmp/test_key -J bastion $SERVER_A 2>&1
+echo $?
+# Expect: "sqssh: ProxyJump (-J) is not yet implemented"
+# Exit code: 1
+```
+
+### A12.10 sqssh -o option (accepted, ignored)
+```
+sqssh -i /tmp/test_key -o StrictHostKeyChecking=no $SERVER_A "echo opt-test"
+# Expect: "opt-test" (option accepted but ignored)
+```
+
+### A12.11 sqscp --version
+```
+sqscp --version
+# Expect: "sqscp 0.1.0"
+```
+
+### A12.12 sqscp stub -J
+```
+sqscp -J bastion /tmp/test_upload $SERVER_A:/tmp/ 2>&1
+echo $?
+# Expect: "sqscp: ProxyJump (-J) is not yet implemented"
+# Exit code: 1
+```
+
+### A12.13 sqscp -o (accepted, ignored)
+```
+sqscp -i /tmp/test_key -o Compression=yes /tmp/test_upload $SERVER_A:/tmp/test_opt
+# Expect: upload succeeds
+```
+
+### A12.14 sqsftp --version
+```
+sqsftp --version
+# Expect: "sqsftp 0.1.0"
+```
+
+### A12.15 sqsftp -P port (capital P alias)
+```
+echo "pwd\nquit" | sqsftp -i /tmp/test_key -P 22 $SERVER_A
+# Expect: same as -p 22
+```
+
+### A12.16 sqsftp -b batch file
+```
+cat > /tmp/sftp_batch << EOF
+pwd
+cd /tmp
+pwd
+quit
+EOF
+sqsftp -i /tmp/test_key -b /tmp/sftp_batch $SERVER_A
+# Expect: shows home dir, then /tmp, no sftp> prompt
+rm /tmp/sftp_batch
+```
+
+### A12.17 sqsftp -q quiet mode
+```
+echo -e "pwd\nquit" | sqsftp -i /tmp/test_key -q $SERVER_A 2>&1
+# Expect: output with no extra diagnostics
+```
+
+### A12.18 sqssh-keygen --version
+```
+sqssh-keygen --version
+# Expect: "sqssh-keygen 0.1.0"
+```
+
+### A12.19 sqssh-keygen -l fingerprint (short flag)
+```
+sqssh-keygen -l /tmp/test_key
+# Expect: same output as --fingerprint
+```
+
+### A12.20 sqssh-keygen -p change passphrase (short flag)
+```
+echo "" | sqssh-keygen -f /tmp/test_key_pp -C "pp-test"
+printf "\nnew\nnew\n" | sqssh-keygen -p /tmp/test_key_pp
+head -1 /tmp/test_key_pp
+# Expect: SQSSH-ED25519-ENCRYPTED-KEY
+printf "new\n\n\n" | sqssh-keygen -p /tmp/test_key_pp
+head -1 /tmp/test_key_pp
+# Expect: SQSSH-ED25519-PRIVATE-KEY (passphrase removed)
+rm -f /tmp/test_key_pp /tmp/test_key_pp.pub
+```
+
+### A12.21 sqssh-keygen -N non-interactive passphrase
+```
+sqssh-keygen -f /tmp/test_key_ni -C "ni-test" -N ""
+head -1 /tmp/test_key_ni
+# Expect: SQSSH-ED25519-PRIVATE-KEY (no passphrase)
+sqssh-keygen -f /tmp/test_key_ni2 -C "ni-test2" -N "secret"
+head -1 /tmp/test_key_ni2
+# Expect: SQSSH-ED25519-ENCRYPTED-KEY
+rm -f /tmp/test_key_ni /tmp/test_key_ni.pub /tmp/test_key_ni2 /tmp/test_key_ni2.pub
+```
+
+### A12.22 sqssh-keygen -y print public key
+```
+sqssh-keygen -y -f /tmp/test_key
+# Expect: sqssh-ed25519 <base58>
+```
+
+### A12.23 sqssh-keygen -q quiet mode
+```
+echo "" | sqssh-keygen -q -f /tmp/test_key_quiet -C "quiet"
+# Expect: no "Generated" message, just creates files
+rm -f /tmp/test_key_quiet /tmp/test_key_quiet.pub
+```
+
+### A12.24 sqssh-keygen -t type validation
+```
+sqssh-keygen -t ed25519 -f /tmp/test_key_t -N "" 2>&1
+# Expect: generates key (ed25519 is valid)
+sqssh-keygen -t rsa -f /tmp/test_key_rsa -N "" 2>&1
+echo $?
+# Expect: error about unsupported key type, exit 1
+rm -f /tmp/test_key_t /tmp/test_key_t.pub
+```
+
+### A12.25 sqssh-keyscan scan subcommand
+```
+sqssh-keyscan scan 167.235.197.87 2>&1
+# Expect: message about sQUIC silent servers, not an error
+echo $?
+# Expect: 0
+```
+
+### A12.26 sqssh-keyscan --version
+```
+sqssh-keyscan --version
+# Expect: "sqssh-keyscan 0.1.0"
+```
+
+### A12.27 sqssh-agent -k kill
+```
+sqssh-agent &
+AGENT_PID=$!
+sleep 1
+sqssh-agent -k
+sleep 1
+kill -0 $AGENT_PID 2>/dev/null && echo FAIL || echo PASS
+rm -f ~/.sqssh/agent.sock
+```
+
+### A12.28 sqssh-agent --version
+```
+sqssh-agent --version
+# Expect: "sqssh-agent 0.1.0"
+```
+
+### A12.29 sqssh-add -L list public keys
+```
+sqssh-agent &
+AGENT_PID=$!
+export SQSSH_AGENT_SOCK=~/.sqssh/agent.sock
+sleep 1
+sqssh-add /tmp/test_key
+sqssh-add -L
+# Expect: sqssh-ed25519 <base58> <comment>
+sqssh-add -l
+# Expect: fingerprint only
+kill $AGENT_PID
+rm -f ~/.sqssh/agent.sock
+```
+
+### A12.30 sqssh-add -q quiet mode
+```
+sqssh-agent &
+AGENT_PID=$!
+export SQSSH_AGENT_SOCK=~/.sqssh/agent.sock
+sleep 1
+sqssh-add -q /tmp/test_key 2>&1
+# Expect: no "Identity added" message
+kill $AGENT_PID
+rm -f ~/.sqssh/agent.sock
+```
+
+### A12.31 sqssh-add stub -x/-X lock/unlock
+```
+sqssh-add -x 2>&1
+# Expect: "not yet implemented"
+sqssh-add -X 2>&1
+# Expect: "not yet implemented"
+```
+
+### A12.32 sqssh-add --version
+```
+sqssh-add --version
+# Expect: "sqssh-add 0.1.0"
+```
+
+### A12.33 sqssh-copy-id -n dry run
+```
+sqssh-copy-id -n -i /tmp/test_key.pub $SERVER_A 2>&1
+# Expect: "Would deploy key: <pubkey> to <host>" without connecting
+```
+
+### A12.34 sqssh-copy-id --version
+```
+sqssh-copy-id --version
+# Expect: "sqssh-copy-id 0.1.0"
+```
+
+### A12.35 sqsshctl --version
+```
+sqsshctl --version
+# Expect: "sqsshctl 0.1.0"
+```
+
+---
+
+## A13. Cleanup (automated)
 ```
 rm -f /tmp/test_key /tmp/test_key.pub /tmp/test_key_a /tmp/test_key_a.pub
 rm -f /tmp/test_key_enc /tmp/test_key_enc.pub /tmp/test_key_c /tmp/test_key_c.pub
@@ -532,6 +803,7 @@ rm -f /tmp/test_upload /tmp/test_download /tmp/test_from_home /tmp/sftp_dl
 rm -f /tmp/multi_a.txt /tmp/multi_b.txt
 rm -rf /tmp/test_dir /tmp/test_dir_dl
 rm -f /tmp/unknown_key /tmp/unknown_key.pub
+rm -f /tmp/sqssh_test_config /tmp/sftp_batch
 rm -f ~/.sqssh/config.bak
 ```
 
