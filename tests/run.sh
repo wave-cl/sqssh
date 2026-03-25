@@ -1082,12 +1082,13 @@ echo "$OUT" | grep -qE '^[A-Za-z0-9]{32,}$' \
     && pass "A15.20" "sqsshd --show-pubkey" || fail "A15.20" "sqsshd --show-pubkey" "$OUT"
 
 # A15.21 sqsshd --host-key --port --log-level
-ssh "$SERVER_A" "sqsshd --host-key /etc/sqssh/host_key --port 4022 --log-level debug &
+OUT=$(ssh "$SERVER_A" "sqsshd --host-key /etc/sqssh/host_key --port 4022 --log-level debug &
+PID=\$!
 sleep 1
-OUT=\$(ss -ulnp | grep 4022)
-kill %1 2>/dev/null; wait 2>/dev/null
-echo \"\$OUT\"" 2>&1 | grep -q 4022 \
-    && pass "A15.21" "sqsshd --host-key --port --log-level" || fail "A15.21" "sqsshd --host-key --port --log-level"
+ss -ulnp | grep 4022
+kill \$PID 2>/dev/null; wait \$PID 2>/dev/null" 2>&1)
+echo "$OUT" | grep -q 4022 \
+    && pass "A15.21" "sqsshd --host-key --port --log-level" || fail "A15.21" "sqsshd --host-key --port --log-level" "$OUT"
 
 # A15.22 sqsshd --no-migration
 OUT=$(ssh "$SERVER_A" "sqsshd --no-migration --port 4023 &
