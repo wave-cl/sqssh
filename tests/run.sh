@@ -210,17 +210,17 @@ section_start "A2. Known Hosts"
 PUBKEY=$(ssh "$SERVER_A" "sqsshd --show-pubkey" 2>/dev/null)
 
 # A2.1
-sqssh-keyscan add test.example.com "$PUBKEY" 2>/dev/null
+sqssh-keyscan add test.example.com "$PUBKEY" > /dev/null 2>&1
 sqssh-keyscan list 2>/dev/null | grep -q test.example.com && R1=1 || R1=0
-sqssh-keyscan remove test.example.com 2>/dev/null
+sqssh-keyscan remove test.example.com > /dev/null 2>&1
 sqssh-keyscan list 2>/dev/null | grep -q test.example.com && R2=1 || R2=0
 [[ $R1 -eq 1 && $R2 -eq 0 ]] \
     && pass "A2.1" "Add, list, remove" || fail "A2.1" "Add, list, remove"
 
 # A2.2
-sqssh-keyscan add "*.internal" "$PUBKEY" 2>/dev/null
+sqssh-keyscan add "*.internal" "$PUBKEY" > /dev/null 2>&1
 sqssh-keyscan list 2>/dev/null | grep -q internal && R1=1 || R1=0
-sqssh-keyscan remove "*.internal" 2>/dev/null
+sqssh-keyscan remove "*.internal" > /dev/null 2>&1
 [[ $R1 -eq 1 ]] \
     && pass "A2.2" "Wildcard patterns" || fail "A2.2" "Wildcard patterns"
 
@@ -463,7 +463,7 @@ section_start "A9. Key Agent"
 
 pkill -f sqssh-agent 2>/dev/null || true
 rm -f ~/.sqssh/agent.sock
-sqssh-agent &
+sqssh-agent > /dev/null 2>&1 &
 AGENT_PID=$!
 export SQSSH_AGENT_SOCK=~/.sqssh/agent.sock
 sleep 1
@@ -719,6 +719,7 @@ pkill -f sqssh-agent 2>/dev/null || true
 rm -f ~/.sqssh/agent.sock
 sqssh-agent > /dev/null 2>&1 &
 AGENT_PID=$!
+disown $AGENT_PID
 sleep 1
 sqssh-agent -k > /dev/null 2>&1 || true
 sleep 1
