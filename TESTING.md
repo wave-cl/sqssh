@@ -485,9 +485,6 @@ echo -e "pwd\nquit" | sqsftp -F /tmp/sqssh_test_config -i /tmp/test_key testhost
 
 ## A11. File and Socket Permissions
 
-> **Note:** A11.3 and A11.4 are destructive — they temporarily modify authorized_keys.
-> This section runs last before the CLI flag tests and cleanup.
-
 ### A11.1 Client-side permissions
 ```
 stat -f "%Lp" ~/.sqssh/id_ed25519       # Expect: 600
@@ -503,23 +500,6 @@ ssh $SERVER_A "stat -c %a ~/.sqssh"                        # Expect: 700
 ssh $SERVER_A "stat -c %a ~/.sqssh/authorized_keys"        # Expect: 600
 ssh $SERVER_A "stat -c %a /run/sqssh/control.sock 2>/dev/null || \
                stat -c %a /var/run/sqssh/control.sock"     # Expect: 666
-```
-
-### A11.3 Authorized keys security: symlink rejected
-```
-ssh $SERVER_A "cp ~/.sqssh/authorized_keys ~/.sqssh/ak_backup"
-ssh $SERVER_A "rm ~/.sqssh/authorized_keys && ln -s /tmp/evil ~/.sqssh/authorized_keys"
-ssh $SERVER_A "sqsshctl reload-keys"
-# Expect: error about symlink
-ssh $SERVER_A "rm ~/.sqssh/authorized_keys && mv ~/.sqssh/ak_backup ~/.sqssh/authorized_keys"
-```
-
-### A11.4 Authorized keys security: world-writable rejected
-```
-ssh $SERVER_A "chmod 666 ~/.sqssh/authorized_keys"
-ssh $SERVER_A "sqsshctl reload-keys"
-# Expect: error about permissions
-ssh $SERVER_A "chmod 600 ~/.sqssh/authorized_keys"
 ```
 
 ---
@@ -795,7 +775,31 @@ sqsshctl --version
 
 ---
 
-## A13. Cleanup (automated)
+## A13. Destructive Security Tests
+
+> **Warning:** These tests temporarily modify authorized_keys on the server.
+> They run last (after all other tests) to avoid breaking connectivity.
+
+### A13.1 Authorized keys security: symlink rejected
+```
+ssh $SERVER_A "cp ~/.sqssh/authorized_keys ~/.sqssh/ak_backup"
+ssh $SERVER_A "rm ~/.sqssh/authorized_keys && ln -s /tmp/evil ~/.sqssh/authorized_keys"
+ssh $SERVER_A "sqsshctl reload-keys"
+# Expect: error about symlink
+ssh $SERVER_A "rm ~/.sqssh/authorized_keys && mv ~/.sqssh/ak_backup ~/.sqssh/authorized_keys"
+```
+
+### A13.2 Authorized keys security: world-writable rejected
+```
+ssh $SERVER_A "chmod 666 ~/.sqssh/authorized_keys"
+ssh $SERVER_A "sqsshctl reload-keys"
+# Expect: error about permissions
+ssh $SERVER_A "chmod 600 ~/.sqssh/authorized_keys"
+```
+
+---
+
+## A14. Cleanup (automated)
 ```
 rm -f /tmp/test_key /tmp/test_key.pub /tmp/test_key_a /tmp/test_key_a.pub
 rm -f /tmp/test_key_enc /tmp/test_key_enc.pub /tmp/test_key_c /tmp/test_key_c.pub
