@@ -30,14 +30,14 @@ done
 TMPDIR="/tmp/sqssh-test-$$"
 mkdir -p "$TMPDIR"
 
-# Find binaries: check target/debug, target/release, ~/bin, then PATH
+# Find binaries: prefer release over debug to avoid stale builds
 SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-if [[ -x "$SCRIPT_DIR/target/debug/sqssh" ]]; then
-    export PATH="$SCRIPT_DIR/target/debug:$PATH"
-elif [[ -x "$SCRIPT_DIR/target/release/sqssh" ]]; then
+if [[ -x "$SCRIPT_DIR/target/release/sqssh" ]]; then
     export PATH="$SCRIPT_DIR/target/release:$PATH"
 elif [[ -x "$HOME/bin/sqssh" ]]; then
     export PATH="$HOME/bin:$PATH"
+elif [[ -x "$SCRIPT_DIR/target/debug/sqssh" ]]; then
+    export PATH="$SCRIPT_DIR/target/debug:$PATH"
 fi
 
 # Colors
