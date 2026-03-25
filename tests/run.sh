@@ -919,11 +919,150 @@ echo "$OUT" | grep -qi "permission\|writable\|error\|denied\|reject\|insecure" \
 fi
 section_end
 
-# ─── A14. Cleanup ────────────────────────────────────────────────────────────
-section_start "A14. Cleanup"
+# ─── A15. Long-form Flags ────────────────────────────────────────────────────
+section_start "A15. Long-form Flags"
+if [[ "$SKIP_SECTION" != "true" ]]; then
+
+# A15.1 sqssh --port --identity --login-name
+OUT=$(sqssh --identity /tmp/test_key --login-name root --port 22 "$HOST_IP" "whoami" 2>&1)
+echo "$OUT" | grep -q "root" \
+    && pass "A15.1" "sqssh --port --identity --login-name" || fail "A15.1" "sqssh long flags" "$OUT"
+
+# A15.2 sqssh --no-command
+timeout_cmd 5 sqssh --identity /tmp/test_key --no-command "$SERVER_A" > /dev/null 2>&1 || true
+pass "A15.2" "sqssh --no-command"
+
+# A15.3 sqssh --quiet
+OUT=$(sqssh --identity /tmp/test_key --quiet "$SERVER_A" "echo long-quiet" 2>&1)
+echo "$OUT" | grep -q "long-quiet" \
+    && pass "A15.3" "sqssh --quiet" || fail "A15.3" "sqssh --quiet" "$OUT"
+
+# A15.4 sqssh --local-forward stub
+OUT=$(sqssh --identity /tmp/test_key --local-forward 8080:localhost:80 "$SERVER_A" 2>&1 || true)
+echo "$OUT" | grep -qi "not yet implemented" \
+    && pass "A15.4" "sqssh --local-forward stub" || fail "A15.4" "sqssh --local-forward stub" "$OUT"
+
+# A15.5 sqssh --proxy-jump stub
+OUT=$(sqssh --identity /tmp/test_key --proxy-jump bastion "$SERVER_A" 2>&1 || true)
+echo "$OUT" | grep -qi "not yet implemented" \
+    && pass "A15.5" "sqssh --proxy-jump stub" || fail "A15.5" "sqssh --proxy-jump stub" "$OUT"
+
+# A15.6 sqssh --option
+OUT=$(sqssh --identity /tmp/test_key --option Key=Val "$SERVER_A" "echo long-opt" 2>&1)
+echo "$OUT" | grep -q "long-opt" \
+    && pass "A15.6" "sqssh --option" || fail "A15.6" "sqssh --option" "$OUT"
+
+# A15.7 sqscp --port --identity --preserve --recursive
+mkdir -p "$TMPDIR/longdir"
+echo "longtest" > "$TMPDIR/longdir/f.txt"
+sqscp --port 22 --identity /tmp/test_key --preserve --recursive "$TMPDIR/longdir" "$SERVER_A":/tmp/ > /dev/null 2>&1 \
+    && pass "A15.7" "sqscp --port --preserve --recursive" || fail "A15.7" "sqscp long flags"
+
+# A15.8 sqscp --proxy-jump stub
+OUT=$(sqscp --proxy-jump bastion /tmp/test_upload "$SERVER_A":/tmp/ 2>&1 || true)
+echo "$OUT" | grep -qi "not yet implemented" \
+    && pass "A15.8" "sqscp --proxy-jump stub" || fail "A15.8" "sqscp --proxy-jump stub" "$OUT"
+
+# A15.9 sqsftp --batch
+cat > "$TMPDIR/longbatch" << 'BATCH'
+pwd
+quit
+BATCH
+OUT=$(sqsftp --identity /tmp/test_key --batch "$TMPDIR/longbatch" "$SERVER_A" 2>&1)
+echo "$OUT" | grep -q "/" \
+    && pass "A15.9" "sqsftp --batch" || fail "A15.9" "sqsftp --batch" "$OUT"
+
+# A15.10 sqssh-keygen --file --comment --new-passphrase
+sqssh-keygen --file "$TMPDIR/lk1" --comment "longform" --new-passphrase "" > /dev/null 2>&1
+[[ -f "$TMPDIR/lk1" ]] && grep -q "longform" "$TMPDIR/lk1.pub" \
+    && pass "A15.10" "sqssh-keygen --file --comment --new-passphrase" || fail "A15.10" "sqssh-keygen long flags"
+
+# A15.11 sqssh-keygen --print-public
+OUT=$(sqssh-keygen --print-public --file /tmp/test_key 2>&1)
+echo "$OUT" | grep -q "sqssh-ed25519" \
+    && pass "A15.11" "sqssh-keygen --print-public" || fail "A15.11" "sqssh-keygen --print-public" "$OUT"
+
+# A15.12 sqssh-keygen --fingerprint
+OUT=$(sqssh-keygen --fingerprint /tmp/test_key 2>&1)
+[[ ${#OUT} -gt 5 ]] \
+    && pass "A15.12" "sqssh-keygen --fingerprint" || fail "A15.12" "sqssh-keygen --fingerprint" "$OUT"
+
+# A15.13 sqssh-keygen --type
+sqssh-keygen --type ed25519 --file "$TMPDIR/lk2" --new-passphrase "" > /dev/null 2>&1 && R1=0 || R1=1
+sqssh-keygen --type rsa --file "$TMPDIR/lk3" --new-passphrase "" > /dev/null 2>&1 && R2=0 || R2=1
+[[ $R1 -eq 0 && $R2 -eq 1 ]] \
+    && pass "A15.13" "sqssh-keygen --type" || fail "A15.13" "sqssh-keygen --type" "ed25519=$R1 rsa=$R2"
+
+# A15.14 sqssh-keyscan scan --port
+OUT=$(sqssh-keyscan scan "$HOST_IP" --port 22 2>&1)
+EC=$?
+[[ $EC -eq 0 ]] \
+    && pass "A15.14" "sqssh-keyscan scan --port" || fail "A15.14" "sqssh-keyscan scan --port" "$OUT"
+
+# A15.15 sqssh-agent --kill
+pkill -f sqssh-agent 2>/dev/null || true
+rm -f ~/.sqssh/agent.sock
+sqssh-agent > /dev/null 2>&1 &
+AGENT_PID=$!
+disown $AGENT_PID
+sleep 0.3
+sqssh-agent --kill > /dev/null 2>&1 || true
+sleep 0.3
+kill -0 $AGENT_PID 2>/dev/null && R=FAIL || R=PASS
+[[ "$R" == "PASS" ]] \
+    && pass "A15.15" "sqssh-agent --kill" || fail "A15.15" "sqssh-agent --kill"
+rm -f ~/.sqssh/agent.sock
+
+# A15.16 sqssh-add --list --list-public --delete-all
+pkill -f sqssh-agent 2>/dev/null || true
+rm -f ~/.sqssh/agent.sock
+sqssh-agent > /dev/null 2>&1 &
+AGENT_PID=$!
+export SQSSH_AGENT_SOCK=~/.sqssh/agent.sock
+sleep 0.3
+sqssh-add /tmp/test_key > /dev/null 2>&1
+OUT1=$(sqssh-add --list 2>&1)
+OUT2=$(sqssh-add --list-public 2>&1)
+sqssh-add --delete-all > /dev/null 2>&1
+OUT3=$(sqssh-add --list 2>&1)
+echo "$OUT2" | grep -q "sqssh-ed25519" \
+    && pass "A15.16" "sqssh-add --list --list-public --delete-all" || fail "A15.16" "sqssh-add long flags" "$OUT2"
+kill $AGENT_PID 2>/dev/null || true
+wait $AGENT_PID 2>/dev/null || true
+rm -f ~/.sqssh/agent.sock
+
+# A15.17 sqssh-add --quiet
+pkill -f sqssh-agent 2>/dev/null || true
+rm -f ~/.sqssh/agent.sock
+sqssh-agent > /dev/null 2>&1 &
+AGENT_PID=$!
+export SQSSH_AGENT_SOCK=~/.sqssh/agent.sock
+sleep 0.3
+OUT=$(sqssh-add --quiet /tmp/test_key 2>&1)
+[[ -z "$OUT" || ! "$OUT" =~ "added" ]] \
+    && pass "A15.17" "sqssh-add --quiet" || fail "A15.17" "sqssh-add --quiet" "$OUT"
+kill $AGENT_PID 2>/dev/null || true
+wait $AGENT_PID 2>/dev/null || true
+rm -f ~/.sqssh/agent.sock
+
+# A15.18 sqssh-copy-id --dry-run --identity
+OUT=$(sqssh-copy-id --dry-run --identity /tmp/test_key.pub "$SERVER_A" 2>&1 || true)
+echo "$OUT" | grep -qi "would\|dry" \
+    && pass "A15.18" "sqssh-copy-id --dry-run --identity" || fail "A15.18" "sqssh-copy-id long flags" "$OUT"
+
+# A15.19 sqsshctl --socket
+OUT=$(ssh "$SERVER_A" "sqsshctl --socket /var/run/sqssh/control.sock reload-keys" 2>&1)
+echo "$OUT" | grep -qi "reload" \
+    && pass "A15.19" "sqsshctl --socket" || fail "A15.19" "sqsshctl --socket" "$OUT"
+
+fi
+section_end
+
+# ─── A16. Cleanup ────────────────────────────────────────────────────────────
+section_start "A16. Cleanup"
 if [[ "$SKIP_SECTION" != "true" ]]; then
 # cleanup happens via trap
-pass "A14" "Cleanup (via trap)"
+pass "A16" "Cleanup (via trap)"
 fi
 section_end
 

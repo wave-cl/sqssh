@@ -795,7 +795,26 @@ sqsshctl --version
 
 ---
 
-## A13. Destructive Security Tests
+## A13. Long-form Flags
+
+Tests that every `--long-form` flag works identically to its `-short` counterpart.
+
+### A13.1–A13.19
+
+See `tests/run.sh` section A15 for the full list. Covers:
+- `sqssh --port --identity --login-name --no-command --quiet --local-forward --proxy-jump --option`
+- `sqscp --port --preserve --recursive --proxy-jump`
+- `sqsftp --batch`
+- `sqssh-keygen --file --comment --new-passphrase --print-public --fingerprint --type`
+- `sqssh-keyscan scan --port`
+- `sqssh-agent --kill`
+- `sqssh-add --list --list-public --delete-all --quiet`
+- `sqssh-copy-id --dry-run --identity`
+- `sqsshctl --socket`
+
+---
+
+## A14. Destructive Security Tests
 
 > **Warning:** These tests temporarily modify authorized_keys on the server.
 > They run last (after all other tests) to avoid breaking connectivity.
@@ -819,7 +838,7 @@ ssh $SERVER_A "chmod 600 ~/.sqssh/authorized_keys"
 
 ---
 
-## A14. Cleanup (automated)
+## A15. Cleanup (automated)
 ```
 rm -f /tmp/test_key /tmp/test_key.pub /tmp/test_key_a /tmp/test_key_a.pub
 rm -f /tmp/test_key_enc /tmp/test_key_enc.pub /tmp/test_key_c /tmp/test_key_c.pub
