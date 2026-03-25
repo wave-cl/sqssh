@@ -14,15 +14,19 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
+            archive_target: x86_64-linux-gnu
             os: ubuntu-latest
             use_cross: false
           - target: aarch64-unknown-linux-gnu
+            archive_target: aarch64-linux-gnu
             os: ubuntu-latest
             use_cross: true
           - target: aarch64-apple-darwin
+            archive_target: aarch64-apple-darwin
             os: macos-latest
             use_cross: false
           - target: x86_64-apple-darwin
+            archive_target: x86_64-apple-darwin
             os: macos-15-intel
             use_cross: false
 
@@ -50,7 +54,7 @@ jobs:
       - name: Package
         run: |
           VERSION="${GITHUB_REF_NAME}"
-          ARCHIVE="sqssh-${VERSION}-${{ matrix.target }}.tar.gz"
+          ARCHIVE="sqssh-${VERSION}-${{ matrix.archive_target }}.tar.gz"
           BINDIR="target/${{ matrix.target }}/release"
 
           BINS=""
@@ -65,7 +69,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: sqssh-${{ matrix.target }}
+          name: sqssh-${{ matrix.archive_target }}
           path: ${{ env.ARCHIVE }}
 
   release:
