@@ -1055,6 +1055,69 @@ OUT=$(ssh "$SERVER_A" "sqsshctl --socket /var/run/sqssh/control.sock reload-keys
 echo "$OUT" | grep -qi "reload" \
     && pass "A15.19" "sqsshctl --socket" || fail "A15.19" "sqsshctl --socket" "$OUT"
 
+
+
+# A15.20 sqsshd --show-pubkey
+OUT=$(ssh "$SERVER_A" "sqsshd --show-pubkey" 2>&1)
+echo "$OUT" | grep -qE '^[A-Za-z0-9]{32,}$' \
+    && pass "A15.20" "sqsshd --show-pubkey" || fail "A15.20" "sqsshd --show-pubkey" "$OUT"
+
+# A15.21 sqsshd --host-key --port --log-level
+ssh "$SERVER_A" "sqsshd --host-key /etc/sqssh/host_key --port 4022 --log-level debug &
+sleep 1
+OUT=\$(ss -ulnp | grep 4022)
+kill %1 2>/dev/null; wait 2>/dev/null
+echo \"\$OUT\"" 2>&1 | grep -q 4022 \
+    && pass "A15.21" "sqsshd --host-key --port --log-level" || fail "A15.21" "sqsshd --host-key --port --log-level"
+
+# A15.22 sqsshd --no-migration
+OUT=$(ssh "$SERVER_A" "sqsshd --no-migration --port 4023 &
+sleep 1
+kill %1 2>/dev/null; wait 2>/dev/null
+echo ok" 2>&1)
+echo "$OUT" | grep -q "ok" \
+    && pass "A15.22" "sqsshd --no-migration" || fail "A15.22" "sqsshd --no-migration" "$OUT"
+
+# A15.23 sqsshd --log-file
+ssh "$SERVER_A" "rm -f /tmp/sqsshd_test.log; sqsshd --log-file /tmp/sqsshd_test.log --port 4024 &
+sleep 1
+kill %1 2>/dev/null; wait 2>/dev/null" 2>&1
+OUT=$(ssh "$SERVER_A" "test -f /tmp/sqsshd_test.log && echo exists || echo missing" 2>&1)
+echo "$OUT" | grep -q "exists" \
+    && pass "A15.23" "sqsshd --log-file" || fail "A15.23" "sqsshd --log-file" "$OUT"
+
+# A15.24 sqsshd --log-json
+OUT=$(ssh "$SERVER_A" "sqsshd --log-json --port 4025 &
+sleep 1
+kill %1 2>/dev/null; wait 2>/dev/null" 2>&1)
+echo "$OUT" | grep -q '{' \
+    && pass "A15.24" "sqsshd --log-json" || fail "A15.24" "sqsshd --log-json" "$OUT"
+
+# A15.25 sqsshd --config
+OUT=$(ssh "$SERVER_A" "sqsshd --config /etc/sqssh/sqsshd.conf --port 4026 &
+sleep 1
+kill %1 2>/dev/null; wait 2>/dev/null
+echo ok" 2>&1)
+echo "$OUT" | grep -q "ok" \
+    && pass "A15.25" "sqsshd --config" || fail "A15.25" "sqsshd --config" "$OUT"
+
+# A15.26 sqsshd --listen
+OUT=$(ssh "$SERVER_A" "sqsshd --listen 127.0.0.1 --port 4027 &
+sleep 1
+BOUND=\$(ss -ulnp | grep 4027 | grep 127.0.0.1)
+kill %1 2>/dev/null; wait 2>/dev/null
+echo \"\$BOUND\"" 2>&1)
+echo "$OUT" | grep -q "127.0.0.1" \
+    && pass "A15.26" "sqsshd --listen" || fail "A15.26" "sqsshd --listen" "$OUT"
+
+# A15.27 sqsshd --auth-mode
+OUT=$(ssh "$SERVER_A" "sqsshd --auth-mode whitelist-only --port 4028 &
+sleep 1
+kill %1 2>/dev/null; wait 2>/dev/null
+echo ok" 2>&1)
+echo "$OUT" | grep -q "ok" \
+    && pass "A15.27" "sqsshd --auth-mode" || fail "A15.27" "sqsshd --auth-mode" "$OUT"
+
 fi
 section_end
 
