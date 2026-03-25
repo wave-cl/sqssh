@@ -478,34 +478,42 @@ rm -f ~/.sqssh/agent.sock
 
 ---
 
-## A11. Configuration
+## A11. Configuration (-F flag)
 
-### A11.1 Host alias
+### A11.1 Host alias via -F
 ```
-# Backup existing config
-cp ~/.sqssh/config ~/.sqssh/config.bak 2>/dev/null
-cat > ~/.sqssh/config << EOF
+cat > /tmp/sqssh_test_config << EOF
 Host testhost
     Hostname 167.235.197.87
     User root
     IdentityFile /tmp/test_key
 EOF
-sqssh testhost "echo config-works"
+sqssh -F /tmp/sqssh_test_config testhost "echo config-works"
 # Expect: "config-works"
-mv ~/.sqssh/config.bak ~/.sqssh/config 2>/dev/null || rm ~/.sqssh/config
 ```
 
-### A11.2 Wildcard matching
+### A11.2 Wildcard matching via -F
 ```
-cat > ~/.sqssh/config << EOF
+cat > /tmp/sqssh_test_config << EOF
 Host *.testdomain
     Hostname 167.235.197.87
     User root
     IdentityFile /tmp/test_key
 EOF
-sqssh server1.testdomain "echo wildcard-works"
+sqssh -F /tmp/sqssh_test_config server1.testdomain "echo wildcard-works"
 # Expect: "wildcard-works"
-rm ~/.sqssh/config
+```
+
+### A11.3 sqscp with -F
+```
+sqscp -F /tmp/sqssh_test_config -i /tmp/test_key /tmp/test_upload root@testhost:/tmp/
+# Expect: upload succeeds using config hostname resolution
+```
+
+### A11.4 sqsftp with -F
+```
+echo -e "pwd\nquit" | sqsftp -F /tmp/sqssh_test_config testhost
+# Expect: shows home directory
 ```
 
 ---

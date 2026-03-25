@@ -19,6 +19,10 @@ struct Cli {
     /// Identity file (private key)
     #[arg(short = 'i', long)]
     identity: Option<PathBuf>,
+
+    /// Config file (default: ~/.sqssh/config)
+    #[arg(short = 'F', long = "config")]
+    config_file: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -46,6 +50,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         user.as_deref(),
         cli.port,
         cli.identity.as_deref(),
+        cli.config_file.as_deref(),
     )
     .await?;
 

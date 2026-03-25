@@ -29,6 +29,10 @@ struct Cli {
     /// Verbose mode (enables debug logging)
     #[arg(short = 'v', long)]
     verbose: bool,
+
+    /// Config file (default: ~/.sqssh/config)
+    #[arg(short = 'F', long = "config")]
+    config_file: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -55,7 +59,10 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // Load config
     let sqssh_dir = keys::sqssh_dir()?;
-    let config = ClientConfig::load(&sqssh_dir.join("config"))?;
+    let config_path = cli.config_file.as_deref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| sqssh_dir.join("config"));
+    let config = ClientConfig::load(&config_path)?;
     let resolved = config.resolve(&host);
 
     let actual_host = resolved.hostname.as_deref().unwrap_or(&host);
@@ -146,7 +153,10 @@ async fn reconnect_raw_shell(
     let cli = Cli::parse();
     let (user, host) = parse_destination(&cli.destination)?;
     let sqssh_dir = keys::sqssh_dir()?;
-    let config = ClientConfig::load(&sqssh_dir.join("config"))?;
+    let config_path = cli.config_file.as_deref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| sqssh_dir.join("config"));
+    let config = ClientConfig::load(&config_path)?;
     let resolved = config.resolve(&host);
 
     let actual_host = resolved.hostname.as_deref().unwrap_or(&host);

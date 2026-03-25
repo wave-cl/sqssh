@@ -50,6 +50,10 @@ struct Cli {
     /// Verbose mode
     #[arg(short = 'v', long)]
     verbose: bool,
+
+    /// Config file (default: ~/.sqssh/config)
+    #[arg(short = 'F', long = "config")]
+    config_file: Option<PathBuf>,
 }
 
 /// Shared progress state.
@@ -156,6 +160,7 @@ async fn upload(
         Some(&remote.user),
         cli.port,
         cli.identity.as_deref(),
+        cli.config_file.as_deref(),
     )
     .await?;
 
@@ -485,6 +490,7 @@ async fn download(
         Some(&remote.user),
         cli.port,
         cli.identity.as_deref(),
+        cli.config_file.as_deref(),
     )
     .await?;
 

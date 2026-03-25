@@ -18,6 +18,10 @@ struct Cli {
     /// Port (UDP)
     #[arg(short = 'p', long)]
     port: Option<u16>,
+
+    /// Config file (default: ~/.sqssh/config)
+    #[arg(short = 'F', long = "config")]
+    config_file: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -59,6 +63,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         user.as_deref(),
         cli.port,
         None,
+        cli.config_file.as_deref(),
     )
     .await?;
 

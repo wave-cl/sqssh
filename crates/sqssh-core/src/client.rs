@@ -55,9 +55,13 @@ pub async fn connect(
     user: Option<&str>,
     port: Option<u16>,
     identity: Option<&Path>,
+    config_file: Option<&Path>,
 ) -> Result<Connection> {
     let sqssh_dir = keys::sqssh_dir()?;
-    let config = ClientConfig::load(&sqssh_dir.join("config"))?;
+    let config_path = config_file
+        .map(PathBuf::from)
+        .unwrap_or_else(|| sqssh_dir.join("config"));
+    let config = ClientConfig::load(&config_path)?;
     let resolved = config.resolve(host);
 
     let actual_host = resolved.hostname.as_deref().unwrap_or(host);
