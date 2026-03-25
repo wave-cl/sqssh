@@ -6,7 +6,7 @@ A modern replacement for the OpenSSH suite, built on [sQUIC](https://github.com/
 
 SSH runs over TCP. sqssh runs over sQUIC, which means:
 
-- **Lower latency** — 0-RTT connection establishment
+- **Lower latency** — Secure 1-RTT connection establishment, SACK piggybacking
 - **Connection migration** — roam between networks without dropping your session
 - **Privacy Concious Server** — the server is invisible to unauthenticated clients (sQUIC whitelisting)
 - **Parallel file transfers** — sqscp copies multiple files simultaneously over independent streams
