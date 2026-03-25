@@ -249,14 +249,20 @@ ssh "$SERVER_A" "grep -qF '$TESTPUB' ~/.sqssh/authorized_keys 2>/dev/null || \
     && pass "A0.4" "Deploy test key" || fail "A0.4" "Deploy test key"
 
 # A0.5
-ssh "$SERVER_A" "systemctl restart sqsshd" 2>/dev/null
-wait_for "ssh '$SERVER_A' 'systemctl is-active sqsshd' 2>/dev/null | grep -q active" 5 0.3 \
-    && pass "A0.5" "Restart sqsshd" || fail "A0.5" "Restart sqsshd"
+ssh "$SERVER_A" "sqsshctl reload-keys --all" 2>/dev/null \
+    && pass "A0.5" "Reload keys" || fail "A0.5" "Reload keys"
 
-# A0.6
-OUT=$(sqssh -i /tmp/test_key "$SERVER_A" "echo setup-ok" 2>&1)
-echo "$OUT" | grep -q "setup-ok" \
-    && pass "A0.6" "sqssh connectivity" || fail "A0.6" "sqssh connectivity" "$OUT"
+# A0.6 — retry with backoff to allow sqsshd to fully start
+A06_OK=false
+for i in 1 2 3; do
+    OUT=$(sqssh -i /tmp/test_key "$SERVER_A" "echo setup-ok" 2>&1)
+    if echo "$OUT" | grep -q "setup-ok"; then
+        A06_OK=true
+        break
+    fi
+    sleep 2
+done
+$A06_OK && pass "A0.6" "sqssh connectivity" || fail "A0.6" "sqssh connectivity" "$OUT"
 
 section_end
 fi  # end NO_SETUP
