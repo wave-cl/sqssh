@@ -13,6 +13,10 @@ Tests are split into **automated** (can run non-interactively with an unencrypte
 #   both       — run automated first, then prompt for manual tests
 ```
 
+## Reporting
+
+Report results after each test section (A0, A1, A2, etc.) before proceeding to the next. If any test fails, **stop immediately** and report the failure — do not continue to subsequent sections until the failure is resolved.
+
 ## Prerequisites
 
 ```
