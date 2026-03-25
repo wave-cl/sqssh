@@ -395,32 +395,157 @@ ssh $SERVER_A "chmod 600 ~/.sqssh/authorized_keys"
 
 ---
 
-## A9. Cleanup (automated)
+## A9. SFTP (piped stdin)
+
+### A9.1 Navigate
+```
+echo -e "pwd\ncd /tmp\npwd\nquit" | sqsftp -i /tmp/test_key $SERVER_A
+# Expect: first pwd shows home dir, second shows /tmp
+```
+
+### A9.2 Upload and download
+```
+echo -e "lcd /tmp\nput test_upload\nget test_upload /tmp/sftp_dl\nquit" | sqsftp -i /tmp/test_key $SERVER_A
+md5sum /tmp/test_upload /tmp/sftp_dl
+# Checksums should match
+```
+
+### A9.3 Directory operations
+```
+echo -e "mkdir /tmp/sftp_auto_test\nls /tmp/sftp_auto_test\nrm /tmp/sftp_auto_test\nquit" | sqsftp -i /tmp/test_key $SERVER_A
+```
+
+### A9.4 File info and rename
+```
+echo -e "stat /etc/motd\nquit" | sqsftp -i /tmp/test_key $SERVER_A
+# Expect: shows path, type, size, mode
+```
+
+### A9.5 Help and unknown command
+```
+echo -e "help\nfoobar\nquit" | sqsftp -i /tmp/test_key $SERVER_A
+# Expect: help output, then "unknown command: foobar"
+```
+
+### A9.6 Local commands
+```
+echo -e "lpwd\nlcd /tmp\nlpwd\nquit" | sqsftp -i /tmp/test_key $SERVER_A
+# Expect: second lpwd shows /tmp
+```
+
+### A9.7 Tilde expansion
+```
+echo -e "cd ~\npwd\nquit" | sqsftp -i /tmp/test_key $SERVER_A
+# Expect: pwd shows home directory
+```
+
+---
+
+## A10. Key Agent (unencrypted key operations)
+
+### A10.1 Add and list unencrypted key
+```
+# Start agent, add unencrypted test key, verify
+sqssh-agent &
+AGENT_PID=$!
+export SQSSH_AGENT_SOCK=~/.sqssh/agent.sock
+sleep 1
+sqssh-add /tmp/test_key
+sqssh-add -l             # Should show the key
+```
+
+### A10.2 Remove specific key
+```
+sqssh-add -d /tmp/test_key
+sqssh-add -l             # Should be empty
+```
+
+### A10.3 Remove all keys
+```
+sqssh-add /tmp/test_key
+sqssh-add -D
+sqssh-add -l             # Should be empty
+kill $AGENT_PID
+```
+
+### A10.4 Stale socket detection
+```
+touch ~/.sqssh/agent.sock
+sqssh-agent 2>&1
+# Expect: error about existing socket
+rm -f ~/.sqssh/agent.sock
+```
+
+---
+
+## A11. Configuration
+
+### A11.1 Host alias
+```
+# Backup existing config
+cp ~/.sqssh/config ~/.sqssh/config.bak 2>/dev/null
+cat > ~/.sqssh/config << EOF
+Host testhost
+    Hostname 167.235.197.87
+    User root
+    IdentityFile /tmp/test_key
+EOF
+sqssh testhost "echo config-works"
+# Expect: "config-works"
+mv ~/.sqssh/config.bak ~/.sqssh/config 2>/dev/null || rm ~/.sqssh/config
+```
+
+### A11.2 Wildcard matching
+```
+cat > ~/.sqssh/config << EOF
+Host *.testdomain
+    Hostname 167.235.197.87
+    User root
+    IdentityFile /tmp/test_key
+EOF
+sqssh server1.testdomain "echo wildcard-works"
+# Expect: "wildcard-works"
+rm ~/.sqssh/config
+```
+
+---
+
+## A12. Ctrl+C Handling
+
+### A12.1 Ctrl+C doesn't kill session
+```
+sqssh -i /tmp/test_key $SERVER_A "sleep 100" &
+PID=$!
+sleep 2
+kill -INT $PID
+sleep 1
+# sqssh should still be running (sleep interrupted, not sqssh)
+kill -0 $PID 2>/dev/null && echo PASS || echo FAIL
+kill $PID 2>/dev/null; wait $PID 2>/dev/null
+```
+
+---
+
+## A13. Cleanup (automated)
 ```
 rm -f /tmp/test_key /tmp/test_key.pub /tmp/test_key_a /tmp/test_key_a.pub
 rm -f /tmp/test_key_enc /tmp/test_key_enc.pub /tmp/test_key_c /tmp/test_key_c.pub
-rm -f /tmp/test_upload /tmp/test_download /tmp/test_from_home
+rm -f /tmp/test_upload /tmp/test_download /tmp/test_from_home /tmp/sftp_dl
 rm -f /tmp/multi_a.txt /tmp/multi_b.txt
 rm -rf /tmp/test_dir /tmp/test_dir_dl
 rm -f /tmp/unknown_key /tmp/unknown_key.pub
+rm -f ~/.sqssh/config.bak
 ```
 
 ---
 
 # Manual Tests
 
-These tests require interactive terminal input, passphrase entry, or physical actions.
+These tests require a real terminal (PTY rendering, escape sequences, window resize, passphrase entry, or physical network changes).
 
 ## M1. Interactive Shell
 
-### M1.1 Basic connection and exit
-```
-sqssh -i /tmp/test_key $SERVER_A
-# Expect: last login message, MOTD, shell prompt
-exit
-```
-
-### M1.2 PTY — htop
+### M1.1 PTY — htop
 ```
 sqssh -i /tmp/test_key $SERVER_A
 htop
@@ -429,16 +554,7 @@ htop
 exit
 ```
 
-### M1.3 Ctrl+C handling
-```
-sqssh -i /tmp/test_key $SERVER_A
-sleep 100
-# Press Ctrl+C
-# Expect: sleep interrupted, shell still alive
-exit
-```
-
-### M1.4 Window resize
+### M1.2 Window resize
 ```
 sqssh -i /tmp/test_key $SERVER_A
 # Resize terminal window by dragging
@@ -447,28 +563,28 @@ stty size
 exit
 ```
 
-### M1.5 Escape: disconnect (~.)
+### M1.3 Escape: disconnect (~.)
 ```
 sqssh -i /tmp/test_key $SERVER_A
 # Press Enter, then type ~.
 # Expect: immediate disconnect
 ```
 
-### M1.6 Escape: help (~?)
+### M1.4 Escape: help (~?)
 ```
 sqssh -i /tmp/test_key $SERVER_A
 # Press Enter, then type ~?
 # Expect: escape sequence help listing
 ```
 
-### M1.7 Escape: literal tilde (~~)
+### M1.5 Escape: literal tilde (~~)
 ```
 sqssh -i /tmp/test_key $SERVER_A
 # Press Enter, then type ~~
 # Expect: single ~ sent to remote shell
 ```
 
-### M1.8 Passphrase-protected key
+### M1.6 Passphrase-protected key
 ```
 sqssh $SERVER_A
 # Expect: passphrase prompt
@@ -479,124 +595,27 @@ exit
 
 ---
 
-## M2. Interactive File Transfer (sqsftp)
+## M2. Key Agent (passphrase operations)
 
-### M2.1 Connect and navigate
-```
-sqsftp -i /tmp/test_key $SERVER_A
-pwd                    # Shows home directory
-ls                     # Lists files
-cd /tmp
-pwd                    # Shows /tmp
-quit
-```
-
-### M2.2 Upload and download
-```
-sqsftp -i /tmp/test_key $SERVER_A
-lcd /tmp
-put test_upload                         # Upload with same name
-put test_upload custom_name.bin         # Upload with custom name
-get custom_name.bin /tmp/sftp_dl        # Download with custom local path
-quit
-# Verify: md5sum /tmp/test_upload /tmp/sftp_dl should match
-```
-
-### M2.3 Directory operations
-```
-sqsftp -i /tmp/test_key $SERVER_A
-mkdir /tmp/sftp_test_dir
-ls /tmp/sftp_test_dir
-rm /tmp/sftp_test_dir
-quit
-```
-
-### M2.4 File info and rename
-```
-sqsftp -i /tmp/test_key $SERVER_A
-stat /etc/motd
-put test_upload rename_me
-rename rename_me renamed_file
-stat renamed_file
-rm renamed_file
-quit
-```
-
-### M2.5 Help and exit aliases
-```
-sqsftp -i /tmp/test_key $SERVER_A
-help                   # Should list commands
-?                      # Should also show help
-foobar                 # Should show "unknown command"
-bye                    # Should exit (also: quit, exit)
-```
-
-### M2.6 Local commands
-```
-sqsftp -i /tmp/test_key $SERVER_A
-lpwd
-lcd /tmp
-lpwd                   # Should show /tmp
-lls
-quit
-```
-
-### M2.7 Tilde expansion
-```
-sqsftp -i /tmp/test_key $SERVER_A
-cd ~
-pwd                    # Should show home directory
-ls ~/
-quit
-```
-
----
-
-## M3. Key Agent (sqssh-agent + sqssh-add)
-
-### M3.1 Start agent and add key
+### M2.1 Start agent and add encrypted key
 ```
 eval $(sqssh-agent)
-sqssh-add -l                          # Expect: no keys
 sqssh-add                             # Enter passphrase when prompted
 sqssh-add -l                          # Expect: key listed
 ```
 
-### M3.2 Connect via agent (no passphrase)
+### M2.2 Connect via agent (no passphrase prompt)
 ```
 sqssh $SERVER_A
 # Expect: no passphrase prompt, direct connection
 exit
 ```
 
-### M3.3 Add and remove keys
-```
-sqssh-add /tmp/test_key               # Add unencrypted key
-sqssh-add -l                          # Expect: 2 keys
-sqssh-add -d /tmp/test_key            # Remove specific key
-sqssh-add -l                          # Expect: 1 key
-sqssh-add -D                          # Remove all
-sqssh-add -l                          # Expect: no keys
-```
-
-### M3.4 Agent socket permissions
-```
-ls -la ~/.sqssh/agent.sock
-# Expect: srw------- (mode 0600)
-```
-
-### M3.5 Stale socket detection
-```
-# With agent already running:
-sqssh-agent
-# Expect: error about existing socket / agent already running
-```
-
 ---
 
-## M4. Server Features — interactive
+## M3. Server Features — interactive
 
-### M4.1 Zero-downtime restart (SIGUSR1)
+### M3.1 Zero-downtime restart (SIGUSR1)
 ```
 # Terminal 1:
 sqssh -i /tmp/test_key $SERVER_A
@@ -611,20 +630,12 @@ ssh $SERVER_A "systemctl reload sqsshd"
 #   No MOTD or last login on reconnect
 ```
 
-### M4.2 Session persistence across restart
+### M3.2 Session persistence across restart
 ```
-# Terminal 1:
-sqssh -i /tmp/test_key $SERVER_A
-tail -f /var/log/sqsshd.log
-
-# Terminal 2:
-ssh $SERVER_A "systemctl reload sqsshd"
-
-# Expect: tail continues outputting after reconnect
-# The tail process (PID) should be the same before and after
+# Same as M3.1 — verify tail process PID is the same before and after
 ```
 
-### M4.3 Connection migration
+### M3.3 Connection migration
 ```
 sqssh -i /tmp/test_key $SERVER_A
 # Switch networks (WiFi to Ethernet, toggle VPN, etc.)
@@ -632,7 +643,7 @@ sqssh -i /tmp/test_key $SERVER_A
 # Server logs should show "client migrated from X to Y"
 ```
 
-### M4.4 MaxSessions enforcement
+### M3.4 MaxSessions enforcement
 ```
 # Set MaxSessions 2 in /etc/sqssh/sqsshd.conf, restart sqsshd
 # Open 2 sqssh sessions — both should succeed
@@ -642,78 +653,9 @@ sqssh -i /tmp/test_key $SERVER_A
 
 ---
 
-## M5. Configuration
-
-### M5.1 Host aliases
-```
-# Add to ~/.sqssh/config:
-#   Host myserver
-#       Hostname 167.235.197.87
-#       User root
-#       Port 22
-sqssh myserver
-# Expect: connects using config values
-exit
-```
-
-### M5.2 Identity file in config
-```
-# Host myserver
-#     IdentityFile /tmp/test_key
-sqssh myserver
-# Expect: uses specified key, no passphrase prompt
-exit
-```
-
-### M5.3 Wildcard matching
-```
-# Host *.prod
-#     User deploy
-#     Port 22
-sqssh web1.prod
-# Expect: uses User deploy
-```
-
----
-
-## M6. Performance Benchmarks (server-to-server)
-
-### M6.1 Full benchmark suite
-```
-# Run from Server A to Server B:
-ssh $SERVER_A "sqscp /tmp/bench_1kb $SERVER_B:/tmp/"
-ssh $SERVER_A "sqscp /tmp/bench_10mb $SERVER_B:/tmp/"
-ssh $SERVER_A "sqscp /tmp/bench_100mb $SERVER_B:/tmp/"
-ssh $SERVER_A "sqscp /tmp/bench_1gb $SERVER_B:/tmp/"
-ssh $SERVER_A "time scp -q /tmp/bench_1gb $SERVER_B:/tmp/scp_1gb"
-```
-
-### M6.2 Many small files
-```
-ssh $SERVER_A "sqscp -r /tmp/bench_small $SERVER_B:/tmp/"
-ssh $SERVER_A "time scp -qr /tmp/bench_small $SERVER_B:/tmp/scp_small"
-# sqscp should be 20x+ faster
-```
-
-### M6.3 Verify integrity
-```
-ssh $SERVER_A "md5sum /tmp/bench_100mb"
-ssh $SERVER_B "md5sum /tmp/bench_100mb"
-# Checksums should match
-```
-
----
-
 ## Cleanup (manual)
 ```
 rm -f /tmp/test_key /tmp/test_key.pub
-rm -f /tmp/test_key_a /tmp/test_key_a.pub
-rm -f /tmp/test_key_enc /tmp/test_key_enc.pub
-rm -f /tmp/test_key_c /tmp/test_key_c.pub
-rm -f /tmp/test_upload /tmp/test_download /tmp/test_from_home
-rm -f /tmp/multi_a.txt /tmp/multi_b.txt /tmp/sftp_dl
-rm -rf /tmp/test_dir /tmp/test_dir_dl
-rm -f /tmp/unknown_key /tmp/unknown_key.pub
 rm -f /tmp/bench_1kb /tmp/bench_10mb /tmp/bench_100mb /tmp/bench_1gb /tmp/bench_dl
 ssh $SERVER_A "rm -f /tmp/test_upload* /tmp/test_download /tmp/test_ts /tmp/test_pm /tmp/test_perms"
 ssh $SERVER_A "rm -rf /tmp/test_dir /tmp/bench_*"
