@@ -7,8 +7,7 @@ use crate::config::ClientConfig;
 use crate::error::{Error, Result};
 use crate::keys;
 use crate::known_hosts::KnownHosts;
-use crate::protocol::{self, ctl_decode, ctl_encode, AgentRequest, AgentResponse, ControlMsg};
-use crate::stream::ControlChannel;
+use crate::protocol::{self, AgentRequest, AgentResponse};
 
 /// Parsed remote destination.
 pub struct RemoteSpec {
@@ -144,27 +143,25 @@ pub async fn connect(
             Error::Connection(hint)
         })?;
 
-    // Authenticate on control channel
-    let mut control = ControlChannel::open(&conn).await?;
-    control
-        .send(&ControlMsg::AuthRequest {
-            username: username.clone(),
-            pubkey: verifying_key.as_bytes().to_vec(),
-        })
-        .await?;
+    // Authenticate on stream 0 (raw binary)
+    let (mut auth_send, mut auth_recv) = conn
+        .open_bi()
+        .await
+        .map_err(|e| Error::Connection(format!("failed to open auth stream: {e}")))?;
+    auth_send
+        .write_all(&protocol::encode_auth_request(&username, verifying_key.as_bytes()))
+        .await
+        .map_err(|e| Error::Connection(format!("failed to send auth request: {e}")))?;
 
-    match control.recv().await? {
-        ControlMsg::AuthSuccess => {
+    match protocol::decode_auth_response(&mut auth_recv).await? {
+        protocol::AuthResponseData::Success => {
             // Auto-learn: save which key worked for this host
             if !key_name.is_empty() {
                 keys::save_key_mapping(host, &key_name).ok();
             }
         }
-        ControlMsg::AuthFailure { message } => {
+        protocol::AuthResponseData::Failure { message } => {
             return Err(Error::Auth(format!("authentication failed: {message}")));
-        }
-        other => {
-            return Err(Error::Protocol(format!("unexpected response: {other:?}")));
         }
     }
 
@@ -189,9 +186,9 @@ fn try_agent_key() -> Option<(SigningKey, VerifyingKey)> {
     let mut stream = UnixStream::connect(&socket_path).ok()?;
 
     // List keys
-    let data = ctl_encode(&AgentRequest::ListKeys).ok()?;
+    let data = AgentRequest::ListKeys.encode();
     stream.write_all(&data).ok()?;
-    let response: AgentResponse = ctl_decode(&mut stream).ok()?;
+    let response = AgentResponse::decode(&mut stream).ok()?;
 
     let pubkey_bytes = match response {
         AgentResponse::Keys { entries } if !entries.is_empty() => {
@@ -206,12 +203,11 @@ fn try_agent_key() -> Option<(SigningKey, VerifyingKey)> {
 
     // Get seed from agent
     let mut stream = UnixStream::connect(&socket_path).ok()?;
-    let data = ctl_encode(&AgentRequest::GetSeed {
+    let data = AgentRequest::GetSeed {
         pubkey: pubkey_bytes.clone(),
-    })
-    .ok()?;
+    }.encode();
     stream.write_all(&data).ok()?;
-    let response: AgentResponse = ctl_decode(&mut stream).ok()?;
+    let response = AgentResponse::decode(&mut stream).ok()?;
 
     match response {
         AgentResponse::Seed { seed } if seed.len() == 32 => {

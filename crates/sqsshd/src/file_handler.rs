@@ -385,10 +385,12 @@ pub async fn handle_raw_upload_chunk(
     Ok(())
 }
 
-/// Handle a raw download request via bidi channel + uni data streams.
+/// Handle a raw download request via bidi streams + uni data streams.
+/// The type byte and path+jobs have already been consumed by the dispatcher.
 pub async fn handle_raw_download(
     conn: &quinn::Connection,
-    channel: &mut Channel,
+    mut send: quinn::SendStream,
+    _recv: quinn::RecvStream,
     username: &str,
     path: &str,
     jobs: u32,
@@ -402,16 +404,16 @@ pub async fn handle_raw_download(
         Ok(m) => m,
         Err(e) => {
             let result = protocol::encode_transfer_result(false, &e.to_string());
-            channel.send.write_all(&result).await.ok();
+            send.write_all(&result).await.ok();
             return Ok(());
         }
     };
 
     if meta.is_dir() {
-        // Send manifest on bidi channel
+        // Send manifest on bidi send
         let entries = walk_directory(&source, &source)?;
         let manifest = protocol::encode_manifest_response(&entries);
-        channel.send.write_all(&manifest).await
+        send.write_all(&manifest).await
             .map_err(|e| format!("failed to send manifest: {e}"))?;
 
         // Send each file on a separate uni stream
@@ -429,7 +431,7 @@ pub async fn handle_raw_download(
 
         // Signal chunked download on bidi
         let signal = [protocol::RAW_DOWNLOAD_CHUNK];
-        channel.send.write_all(&signal).await
+        send.write_all(&signal).await
             .map_err(|e| format!("failed to send chunk signal: {e}"))?;
 
         // Send first chunk header on bidi for file metadata
@@ -453,7 +455,7 @@ pub async fn handle_raw_download(
         meta_buf.extend_from_slice(&first_header.atime.to_be_bytes());
         meta_buf.extend_from_slice(&first_header.offset.to_be_bytes());
         meta_buf.extend_from_slice(&first_header.chunk_length.to_be_bytes());
-        channel.send.write_all(&meta_buf).await
+        send.write_all(&meta_buf).await
             .map_err(|e| format!("chunk metadata: {e}"))?;
 
         // Open j uni streams, each sending a chunk
@@ -484,7 +486,7 @@ pub async fn handle_raw_download(
     } else {
         // Single file, single stream
         let signal = [RAW_DOWNLOAD_DATA];
-        channel.send.write_all(&signal).await
+        send.write_all(&signal).await
             .map_err(|e| format!("failed to send signal: {e}"))?;
 
         let filename = source
@@ -497,199 +499,3 @@ pub async fn handle_raw_download(
     Ok(())
 }
 
-// -- Legacy handlers (kept for sqsftp/other bidi channel users) --
-
-use sqssh_core::protocol::ChannelMsg;
-use sqssh_core::stream::Channel;
-
-/// Handle a file upload via legacy bidi channel (used by sqsftp).
-pub async fn handle_upload(
-    channel: &mut Channel,
-    username: &str,
-    path: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let (uid, gid, home, _shell) = super::pty_handler::lookup_user(username)?;
-
-    let target = validate_path(Path::new(&home), path)
-        .map_err(|e| format!("invalid path: {e}"))?;
-
-    let msg = channel.recv().await?;
-    let (file_path, size, mode, mtime, atime) = match msg {
-        ChannelMsg::FileHeader {
-            size, mode, mtime, atime, ..
-        } => (target.clone(), size, mode, mtime, atime),
-        other => {
-            channel
-                .send(&ChannelMsg::FileResult {
-                    success: false,
-                    message: format!("expected FileHeader, got {other:?}"),
-                })
-                .await?;
-            return Ok(());
-        }
-    };
-
-    if let Some(parent) = file_path.parent() {
-        std::fs::create_dir_all(parent).ok();
-    }
-
-    match write_file_from_channel(channel, &file_path, size, mode, mtime, atime, uid, gid).await {
-        Ok(()) => {
-            channel
-                .send(&ChannelMsg::FileResult {
-                    success: true,
-                    message: String::new(),
-                })
-                .await?;
-        }
-        Err(e) => {
-            channel
-                .send(&ChannelMsg::FileResult {
-                    success: false,
-                    message: e.to_string(),
-                })
-                .await?;
-        }
-    }
-
-    Ok(())
-}
-
-async fn write_file_from_channel(
-    channel: &mut Channel,
-    path: &Path,
-    expected_size: u64,
-    mode: u32,
-    mtime: u64,
-    atime: u64,
-    uid: u32,
-    gid: u32,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use std::io::Write;
-
-    let mut file = std::fs::File::create(path)?;
-    let mut written: u64 = 0;
-
-    loop {
-        match channel.recv().await? {
-            ChannelMsg::Data { payload } => {
-                file.write_all(&payload)?;
-                written += payload.len() as u64;
-            }
-            ChannelMsg::Eof => break,
-            other => {
-                return Err(format!("unexpected message during upload: {other:?}").into());
-            }
-        }
-    }
-
-    file.flush()?;
-    drop(file);
-
-    if written != expected_size {
-        tracing::warn!(
-            "size mismatch for {}: expected {expected_size}, got {written}",
-            path.display()
-        );
-    }
-
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))?;
-    let c_path = std::ffi::CString::new(path.to_string_lossy().as_bytes())?;
-    unsafe {
-        libc::chown(c_path.as_ptr(), uid, gid);
-    }
-
-    if mtime > 0 {
-        let times = [
-            libc::timeval {
-                tv_sec: atime as libc::time_t,
-                tv_usec: 0,
-            },
-            libc::timeval {
-                tv_sec: mtime as libc::time_t,
-                tv_usec: 0,
-            },
-        ];
-        let ret = unsafe { libc::utimes(c_path.as_ptr(), times.as_ptr()) };
-        if ret != 0 {
-            let err = std::io::Error::last_os_error();
-            tracing::warn!("utimes failed for {}: {err}", path.display());
-        }
-    }
-
-    Ok(())
-}
-
-/// Handle a file download via legacy bidi channel (used by sqsftp).
-pub async fn handle_download(
-    channel: &mut Channel,
-    username: &str,
-    path: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let (_uid, _gid, home, _shell) = super::pty_handler::lookup_user(username)?;
-
-    let source = validate_path(Path::new(&home), path)
-        .map_err(|e| format!("invalid path: {e}"))?;
-
-    let meta = std::fs::metadata(&source)?;
-    if meta.is_dir() {
-        let entries = walk_directory(&source, &source)?;
-        channel
-            .send(&ChannelMsg::FileManifest { entries })
-            .await?;
-        return Ok(());
-    }
-
-    send_file_legacy(channel, &source).await
-}
-
-async fn send_file_legacy(
-    channel: &mut Channel,
-    path: &Path,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use std::io::Read;
-
-    let meta = std::fs::metadata(path)?;
-    let filename = path
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
-
-    channel
-        .send(&ChannelMsg::FileHeader {
-            path: filename,
-            size: meta.len(),
-            mode: meta.mode(),
-            mtime: meta.mtime() as u64,
-            atime: meta.atime() as u64,
-        })
-        .await?;
-
-    let mut file = std::fs::File::open(path)?;
-    let mut buf = vec![0u8; 64 * 1024];
-
-    loop {
-        let n = file.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        channel
-            .send(&ChannelMsg::Data {
-                payload: buf[..n].to_vec(),
-            })
-            .await?;
-    }
-
-    channel.send(&ChannelMsg::Eof).await?;
-
-    match channel.recv().await? {
-        ChannelMsg::FileResult { success, message } => {
-            if !success {
-                tracing::warn!("client reported error for {}: {message}", path.display());
-            }
-        }
-        _ => {}
-    }
-
-    Ok(())
-}

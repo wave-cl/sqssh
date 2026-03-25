@@ -12,8 +12,7 @@ use sqssh_core::auth::{AuthMode, AuthorizedKeys};
 use sqssh_core::config::ServerConfig;
 use sqssh_core::keys;
 use sqssh_core::persist::PersistedSession;
-use sqssh_core::protocol::{self, ChannelMsg, ChannelType, ControlMsg, CtlRequest, CtlResponse};
-use sqssh_core::stream::{Channel, ControlChannel};
+use sqssh_core::protocol::{self, CtlRequest, CtlResponse};
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::{watch, Mutex, RwLock};
 use tokio::task::JoinSet;
@@ -25,8 +24,6 @@ mod sftp_handler;
 
 /// Result of accepting a stream from a QUIC connection.
 enum AcceptResult {
-    /// Bidirectional stream with channel protocol (sessions, sftp, file transfer).
-    Bidi(Channel, ChannelType),
     /// Unidirectional stream (raw file upload).
     Uni(quinn::RecvStream),
     /// Raw shell data stream.
@@ -35,6 +32,10 @@ enum AcceptResult {
     ShellControl,
     /// Raw SFTP session.
     RawSftp(quinn::SendStream, quinn::RecvStream),
+    /// Raw exec request.
+    RawExec(quinn::SendStream, quinn::RecvStream, String),
+    /// Raw download request.
+    RawDownloadRequest(quinn::SendStream, quinn::RecvStream, String, u32),
 }
 
 #[derive(Parser)]
@@ -423,21 +424,15 @@ async fn handle_ctl_connection(
     stream: tokio::net::UnixStream,
     state: &ServerState,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::io::AsyncWriteExt;
 
     // Get peer credentials
     let cred = stream.peer_cred()?;
     let peer_uid = cred.uid();
 
-    // Read request
-    let mut len_buf = [0u8; 4];
+    // Read request (binary)
     let mut stream = stream;
-    stream.read_exact(&mut len_buf).await?;
-    let len = u32::from_be_bytes(len_buf) as usize;
-    let mut payload = vec![0u8; len];
-    stream.read_exact(&mut payload).await?;
-
-    let request: CtlRequest = rmp_serde::from_slice(&payload)
+    let request = CtlRequest::decode_async(&mut stream).await
         .map_err(|e| format!("invalid request: {e}"))?;
 
     let response = match request {
@@ -453,11 +448,9 @@ async fn handle_ctl_connection(
         }
     };
 
-    // Send response
-    let resp_payload = rmp_serde::to_vec(&response)?;
-    let resp_len = (resp_payload.len() as u32).to_be_bytes();
-    stream.write_all(&resp_len).await?;
-    stream.write_all(&resp_payload).await?;
+    // Send response (binary)
+    let resp_data = response.encode();
+    stream.write_all(&resp_data).await?;
 
     Ok(())
 }
@@ -695,38 +688,35 @@ async fn handle_connection(
     let remote = conn.remote_address();
     tracing::info!("connected");
 
-    // Accept control channel (stream 0)
-    let mut control = ControlChannel::accept(&conn).await?;
+    // Accept auth stream (stream 0) — raw binary protocol
+    let (mut auth_send, mut auth_recv) = conn.accept_bi().await
+        .map_err(|e| format!("failed to accept auth stream: {e}"))?;
 
     // Auth loop with MaxAuthTries
     let mut auth_attempts = 0usize;
     let (username, pubkey_bytes) = loop {
-        let auth_msg = control.recv().await?;
-        let (username, pubkey_bytes) = match auth_msg {
-            ControlMsg::AuthRequest {
-                username, pubkey, ..
-            } => {
-                tracing::info!(user = %username, "auth request");
-                let pubkey_bytes: [u8; 32] = pubkey
-                    .try_into()
-                    .map_err(|_| "invalid pubkey length")?;
-                (username, pubkey_bytes)
-            }
-            other => {
-                tracing::warn!("expected AuthRequest, got {other:?}");
-                return Ok(());
-            }
-        };
+        // Read type byte
+        let mut type_buf = [0u8; 1];
+        auth_recv.read_exact(&mut type_buf).await
+            .map_err(|e| format!("auth type byte: {e}"))?;
+
+        if type_buf[0] != protocol::AUTH_REQUEST {
+            tracing::warn!("expected AUTH_REQUEST, got {:#x}", type_buf[0]);
+            return Ok(());
+        }
+
+        let auth_data = protocol::decode_auth_request(&mut auth_recv).await?;
+        let username = auth_data.username;
+        let pubkey_bytes = auth_data.pubkey;
+        tracing::info!(user = %username, "auth request");
 
         auth_attempts += 1;
 
         // Check AllowUsers
         if !state.allow_users.is_empty() && !state.allow_users.contains(&username) {
             tracing::warn!(user = %username, "rejected by AllowUsers");
-            control
-                .send(&ControlMsg::AuthFailure {
-                    message: "user not allowed".into(),
-                })
+            auth_send
+                .write_all(&protocol::encode_auth_failure("user not allowed"))
                 .await?;
             if auth_attempts >= state.max_auth_tries {
                 tracing::warn!("max auth tries exceeded");
@@ -738,10 +728,8 @@ async fn handle_connection(
         // Check DenyUsers
         if state.deny_users.contains(&username) {
             tracing::warn!(user = %username, "rejected by DenyUsers");
-            control
-                .send(&ControlMsg::AuthFailure {
-                    message: "user denied".into(),
-                })
+            auth_send
+                .write_all(&protocol::encode_auth_failure("user denied"))
                 .await?;
             if auth_attempts >= state.max_auth_tries {
                 tracing::warn!("max auth tries exceeded");
@@ -766,10 +754,8 @@ async fn handle_connection(
         }
 
         tracing::warn!(user = %username, "auth rejected");
-        control
-            .send(&ControlMsg::AuthFailure {
-                message: "pubkey not authorized for this user".into(),
-            })
+        auth_send
+            .write_all(&protocol::encode_auth_failure("pubkey not authorized for this user"))
             .await?;
 
         if auth_attempts >= state.max_auth_tries {
@@ -778,7 +764,9 @@ async fn handle_connection(
         }
     };
 
-    control.send(&ControlMsg::AuthSuccess).await?;
+    auth_send
+        .write_all(&protocol::encode_auth_success())
+        .await?;
     tracing::info!(user = %username, "auth success");
 
     // Check for a pending persisted session
@@ -815,6 +803,10 @@ async fn handle_connection(
         .in_current_span(),
     );
 
+    // Track upload task handles so sync can wait for completion
+    let upload_handles: Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>> =
+        Arc::new(tokio::sync::Mutex::new(Vec::new()));
+
     // Handle channel requests (bidi) and raw file transfers (uni)
     loop {
         let accept_result = tokio::select! {
@@ -843,41 +835,65 @@ async fn handle_connection(
                                     protocol::RAW_SFTP => {
                                         AcceptResult::RawSftp(send, recv)
                                     }
-                                    _ => {
-                                        // It's a framed channel — the byte we read is the first
-                                        // byte of the 4-byte length prefix. Read the remaining 3
-                                        // bytes, then the full frame.
-                                        let mut rest = [0u8; 3];
-                                        if let Err(e) = recv.read_exact(&mut rest).await {
-                                            tracing::error!("channel frame: {e}");
+                                    protocol::RAW_EXEC => {
+                                        // Read command: [2 bytes cmd_len][command]
+                                        let mut cmd_len_buf = [0u8; 2];
+                                        if let Err(e) = recv.read_exact(&mut cmd_len_buf).await {
+                                            tracing::error!("exec cmd len: {e}");
                                             continue;
                                         }
-                                        let len = u32::from_be_bytes([peek[0], rest[0], rest[1], rest[2]]);
-                                        if len == 0 || len > protocol::MAX_MESSAGE_SIZE {
-                                            tracing::error!("invalid frame length: {len}");
+                                        let cmd_len = u16::from_be_bytes(cmd_len_buf) as usize;
+                                        let mut cmd_buf = vec![0u8; cmd_len];
+                                        if let Err(e) = recv.read_exact(&mut cmd_buf).await {
+                                            tracing::error!("exec cmd: {e}");
                                             continue;
                                         }
-                                        let mut data = vec![0u8; len as usize];
-                                        if let Err(e) = recv.read_exact(&mut data).await {
-                                            tracing::error!("channel frame data: {e}");
-                                            continue;
-                                        }
-                                        let msg_type = data[0];
-                                        let payload = &data[1..];
-                                        match protocol::ChannelMsg::decode(msg_type, payload) {
-                                            Ok(protocol::ChannelMsg::ChannelOpen { channel_type }) => {
-                                                let channel = Channel { send, recv };
-                                                AcceptResult::Bidi(channel, channel_type)
-                                            }
-                                            Ok(other) => {
-                                                tracing::error!("expected ChannelOpen, got {other:?}");
-                                                continue;
+                                        let command = String::from_utf8(cmd_buf).unwrap_or_default();
+                                        AcceptResult::RawExec(send, recv, command)
+                                    }
+                                    protocol::RAW_DOWNLOAD_REQUEST => {
+                                        // Read: [2 bytes path_len][path][4 bytes jobs]
+                                        match protocol::decode_path(&mut recv).await {
+                                            Ok(path) => {
+                                                let mut jobs_buf = [0u8; 4];
+                                                if let Err(e) = recv.read_exact(&mut jobs_buf).await {
+                                                    tracing::error!("download jobs: {e}");
+                                                    continue;
+                                                }
+                                                let jobs = u32::from_be_bytes(jobs_buf);
+                                                AcceptResult::RawDownloadRequest(send, recv, path, jobs)
                                             }
                                             Err(e) => {
-                                                tracing::error!("channel decode: {e}");
+                                                tracing::error!("download path: {e}");
                                                 continue;
                                             }
                                         }
+                                    }
+                                    0xFE => {
+                                        // Sync request — client wants to know all prior uni streams are done.
+                                        // Read expected file count, wait for all upload tasks, then reply.
+                                        let mut sync_send = send;
+                                        let upload_handles_clone = upload_handles.clone();
+                                        tokio::spawn(async move {
+                                            // Read expected count
+                                            let mut count_buf = [0u8; 4];
+                                            let _ = recv.read_exact(&mut count_buf).await;
+                                            let _expected = u32::from_be_bytes(count_buf);
+                                            // Wait for all in-flight upload tasks
+                                            {
+                                                let mut handles = upload_handles_clone.lock().await;
+                                                for handle in handles.drain(..) {
+                                                    let _ = handle.await;
+                                                }
+                                            }
+                                            let _ = sync_send.write_all(&[0xFE]).await;
+                                            let _ = sync_send.finish();
+                                        });
+                                        continue;
+                                    }
+                                    other => {
+                                        tracing::warn!("unknown bidi stream type: {other:#x}");
+                                        continue;
                                     }
                                 }
                             }
@@ -898,7 +914,7 @@ async fn handle_connection(
         match accept_result {
             AcceptResult::Uni(mut recv) => {
                 let user = username.clone();
-                tokio::spawn(async move {
+                let handle = tokio::spawn(async move {
                     let mut type_buf = [0u8; 1];
                     if let Err(e) = recv.read_exact(&mut type_buf).await {
                         tracing::error!("failed to read uni stream type: {e}");
@@ -920,6 +936,7 @@ async fn handle_connection(
                         }
                     }
                 }.in_current_span());
+                upload_handles.lock().await.push(handle);
                 continue;
             }
             AcceptResult::RawShell(data_send, data_recv, header) => {
@@ -1015,199 +1032,41 @@ async fn handle_connection(
                 );
                 continue;
             }
-            AcceptResult::Bidi(_, _) => {}
-        }
-
-        let (mut channel, channel_type) = match accept_result {
-            AcceptResult::Bidi(c, t) => (c, t),
-            _ => unreachable!(),
-        };
-
-        match channel_type {
-            ChannelType::Session => {
-                // Legacy framed session (used by sqssh-copy-id exec)
-                use std::sync::atomic::Ordering::Relaxed;
-                let current = state.active_sessions.fetch_add(1, Relaxed);
-                if current >= state.max_sessions {
-                    state.active_sessions.fetch_sub(1, Relaxed);
-                    tracing::warn!("max sessions ({}) reached, rejecting", state.max_sessions);
-                    channel.reject(1, "too many sessions").await?;
-                    continue;
-                }
-
-                channel.confirm().await?;
+            AcceptResult::RawExec(exec_send, exec_recv, command) => {
                 let user = username.clone();
-                let remote_host = remote.ip().to_string();
-                let print_motd = state.print_motd;
-                let print_last_log = state.print_last_log;
-                let banner = banner_content.clone();
-                let state_ref = state.clone();
-                let client_pk = pubkey_bytes;
-                let resumed_fd = pending_session.take().map(|(fd, info)| {
-                    tracing::info!(
-                        user = %info.username,
-                        pid = info.child_pid,
-                        "resuming persisted session"
-                    );
-                    (fd, info)
-                });
+                let conn_for_exec = conn.clone();
                 tokio::spawn(
                     async move {
-                        if let Some((fd, info)) = resumed_fd {
-                            if let Err(e) = pty_handler::resume_shell(&mut channel, fd, info.child_pid, info.cols, info.rows).await {
-                                tracing::error!("resume error: {e}");
-                            }
-                        } else if let Err(e) = handle_session_with_persist(
-                            channel, &user, &remote_host, print_motd, print_last_log, banner,
-                            &state_ref, client_pk,
+                        if let Err(e) = pty_handler::run_raw_exec(
+                            exec_send, exec_recv, &conn_for_exec, &user, &command,
                         ).await {
-                            tracing::error!("session error: {e}");
-                        }
-                        state_ref.active_sessions.fetch_sub(1, Relaxed);
-                    }
-                    .in_current_span(),
-                );
-            }
-            ChannelType::FileTransfer { direction, path } => {
-                channel.confirm().await?;
-                let user = username.clone();
-                tokio::spawn(
-                    async move {
-                        let result = match direction {
-                            protocol::TransferDirection::Upload => {
-                                file_handler::handle_upload(&mut channel, &user, &path).await
-                            }
-                            protocol::TransferDirection::Download => {
-                                file_handler::handle_download(&mut channel, &user, &path).await
-                            }
-                        };
-                        if let Err(e) = result {
-                            tracing::error!(path = %path, "file transfer error: {e}");
-                            let _ = channel
-                                .send(&ChannelMsg::FileResult {
-                                    success: false,
-                                    message: e.to_string(),
-                                })
-                                .await;
+                            tracing::error!(cmd = %command, "raw exec error: {e}");
                         }
                     }
                     .in_current_span(),
                 );
+                continue;
             }
-            ChannelType::RawDownload { path, jobs } => {
-                channel.confirm().await?;
+            AcceptResult::RawDownloadRequest(dl_send, dl_recv, path, jobs) => {
                 let user = username.clone();
                 let conn_ref = conn.clone();
                 tokio::spawn(
                     async move {
                         if let Err(e) = file_handler::handle_raw_download(
-                            &conn_ref, &mut channel, &user, &path, jobs,
+                            &conn_ref, dl_send, dl_recv, &user, &path, jobs,
                         ).await {
                             tracing::error!(path = %path, "raw download error: {e}");
                         }
                     }
                     .in_current_span(),
                 );
-            }
-            ChannelType::Sftp => {
-                // Legacy framed SFTP — no longer supported, use RAW_SFTP
-                channel.reject(1, "use raw sftp stream").await?;
+                continue;
             }
         }
     }
 
     tracing::info!("disconnected");
     Ok(())
-}
-
-async fn handle_session_with_persist(
-    mut channel: Channel,
-    username: &str,
-    remote_host: &str,
-    print_motd: bool,
-    print_last_log: bool,
-    banner: Option<String>,
-    state: &Arc<ServerState>,
-    client_pubkey: [u8; 32],
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    if let Some(ref content) = banner {
-        channel
-            .send(&ChannelMsg::Data {
-                payload: content.replace('\n', "\r\n").into_bytes(),
-            })
-            .await?;
-    }
-
-    let mut term = String::from("xterm-256color");
-    let mut cols: u16 = 80;
-    let mut rows: u16 = 24;
-
-    loop {
-        let msg = channel.recv().await?;
-        match msg {
-            ChannelMsg::PtyRequest {
-                term: t,
-                cols: c,
-                rows: r,
-            } => {
-                term = t;
-                cols = c as u16;
-                rows = r as u16;
-                channel.send(&ChannelMsg::PtySuccess).await?;
-            }
-            ChannelMsg::ShellRequest => {
-                break;
-            }
-            ChannelMsg::ExecRequest { command } => {
-                tracing::debug!(cmd = %command, "exec request");
-                pty_handler::run_exec(&mut channel, username, &command).await?;
-                return Ok(());
-            }
-            other => {
-                tracing::debug!("ignoring pre-shell message: {other:?}");
-            }
-        }
-    }
-
-    let user = username.to_string();
-    let term_clone = term.clone();
-    let session_id = state.next_session_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-    let (spawn_tx, spawn_rx) = tokio::sync::oneshot::channel::<ActivePtySession>();
-
-    // Spawn a task to register the session once spawn info arrives
-    let state_for_reg = state.clone();
-    tokio::spawn(async move {
-        if let Ok(session) = spawn_rx.await {
-            state_for_reg.pty_sessions.lock().await.insert(session_id, session);
-        }
-    });
-
-    pty_handler::run_shell(
-        &mut channel, username, remote_host, &term, cols, rows, print_motd, print_last_log,
-        move |spawned| {
-            let info = PersistedSession {
-                username: user.clone(),
-                client_pubkey,
-                term: term_clone.clone(),
-                cols,
-                rows,
-                child_pid: spawned.child_pid,
-                home: spawned.home.clone(),
-                shell: spawned.shell.clone(),
-            };
-            tracing::info!(
-                session_id,
-                pid = spawned.child_pid,
-                fd = spawned.master_raw_fd,
-                "registered PTY session for persistence"
-            );
-            let _ = spawn_tx.send(ActivePtySession {
-                info,
-                master_fd: spawned.master_raw_fd,
-            });
-        },
-    ).await
 }
 
 async fn handle_raw_session_with_persist(

@@ -6,10 +6,7 @@ edition = "2021"
 [dependencies]
 squic = { workspace = true }
 tokio = { workspace = true }
-serde = { workspace = true }
-rmp-serde = { workspace = true }
 ed25519-dalek = { workspace = true }
-bytes = { workspace = true }
 bs58 = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

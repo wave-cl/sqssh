@@ -19,4 +19,3 @@ nix = { workspace = true }
 libc = { workspace = true }
 quinn = { workspace = true }
 ed25519-dalek = { workspace = true }
-rmp-serde = { workspace = true }

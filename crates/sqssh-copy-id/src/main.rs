@@ -3,9 +3,7 @@ use std::path::PathBuf;
 use clap::Parser;
 use sqssh_core::client;
 use sqssh_core::keys;
-use sqssh_core::protocol::{ChannelMsg, ChannelType};
-use sqssh_core::stream::Channel;
-use tokio::io::AsyncWriteExt;
+use sqssh_core::protocol;
 
 #[derive(Parser)]
 #[command(name = "sqssh-copy-id", about = "Deploy public key to remote host")]
@@ -64,18 +62,6 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     )
     .await?;
 
-    // Open session channel
-    let mut channel = Channel::open(&conn.conn, ChannelType::Session).await?;
-    match channel.recv().await? {
-        ChannelMsg::ChannelOpenConfirm => {}
-        ChannelMsg::ChannelOpenFailure { description, .. } => {
-            return Err(format!("channel open failed: {description}").into());
-        }
-        other => {
-            return Err(format!("unexpected: {other:?}").into());
-        }
-    }
-
     // Build remote command
     let cmd = format!(
         "mkdir -p ~/.sqssh && \
@@ -88,29 +74,37 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
          echo 'KEY_ADDED')"
     );
 
-    channel
-        .send(&ChannelMsg::ExecRequest { command: cmd })
-        .await?;
+    // Open raw exec bidi stream: [RAW_EXEC][2 bytes cmd_len][command]
+    let (mut send, mut recv) = conn.conn.open_bi().await?;
+    let cmd_bytes = cmd.as_bytes();
+    let mut header = Vec::with_capacity(1 + 2 + cmd_bytes.len());
+    header.push(protocol::RAW_EXEC);
+    header.extend_from_slice(&(cmd_bytes.len() as u16).to_be_bytes());
+    header.extend_from_slice(cmd_bytes);
+    send.write_all(&header).await
+        .map_err(|e| format!("write exec header: {e}"))?;
+    send.finish()
+        .map_err(|e| format!("finish: {e}"))?;
 
-    // Read response
-    let mut stdout = Vec::new();
-    let mut exit_code = 0u32;
-
+    // Read all response data (stdout + 4-byte exit code at the end)
+    let mut all_data = Vec::new();
+    let mut buf = vec![0u8; 8192];
     loop {
-        match channel.recv().await? {
-            ChannelMsg::Data { payload } => {
-                stdout.extend_from_slice(&payload);
-            }
-            ChannelMsg::ExtendedData { payload, .. } => {
-                tokio::io::stderr().write_all(&payload).await?;
-            }
-            ChannelMsg::ExitStatus { code } => {
-                exit_code = code;
-            }
-            ChannelMsg::Eof | ChannelMsg::Close => break,
-            _ => {}
+        match recv.read(&mut buf).await {
+            Ok(Some(n)) => all_data.extend_from_slice(&buf[..n]),
+            Ok(None) => break,
+            Err(e) => return Err(format!("read error: {e}").into()),
         }
     }
+
+    // Extract exit code from last 4 bytes, rest is stdout
+    let (stdout, exit_code) = if all_data.len() >= 4 {
+        let off = all_data.len() - 4;
+        let code = u32::from_be_bytes([all_data[off], all_data[off + 1], all_data[off + 2], all_data[off + 3]]);
+        (all_data[..off].to_vec(), code)
+    } else {
+        (all_data, 0u32)
+    };
 
     let output = String::from_utf8_lossy(&stdout).trim().to_string();
 

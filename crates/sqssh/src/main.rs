@@ -6,8 +6,7 @@ use clap::Parser;
 use sqssh_core::config::ClientConfig;
 use sqssh_core::keys;
 use sqssh_core::known_hosts::KnownHosts;
-use sqssh_core::protocol::{self, ChannelMsg, ChannelType, ControlMsg, RawShellHeader, ShellControlHeader, ShellControlMsg};
-use sqssh_core::stream::{Channel, ControlChannel};
+use sqssh_core::protocol::{self, RawShellHeader, ShellControlHeader, ShellControlMsg};
 use tokio::io::AsyncWriteExt;
 
 #[derive(Parser)]
@@ -113,44 +112,27 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             format!("{hint}")
         })?;
 
-    // Open control channel and authenticate
-    let mut control = ControlChannel::open(&conn).await?;
-    control
-        .send(&ControlMsg::AuthRequest {
-            username: user.clone(),
-            pubkey: verifying_key.as_bytes().to_vec(),
-        })
+    // Authenticate on stream 0 (raw binary)
+    let (mut auth_send, mut auth_recv) = conn.open_bi().await?;
+    auth_send
+        .write_all(&protocol::encode_auth_request(&user, verifying_key.as_bytes()))
         .await?;
 
-    match control.recv().await? {
-        ControlMsg::AuthSuccess => {
+    match protocol::decode_auth_response(&mut auth_recv).await? {
+        protocol::AuthResponseData::Success => {
             // Auto-learn key mapping for this host
             if let Some(key_name) = identity_path.file_name() {
                 keys::save_key_mapping(&host, &key_name.to_string_lossy()).ok();
             }
         }
-        ControlMsg::AuthFailure { message } => {
+        protocol::AuthResponseData::Failure { message } => {
             return Err(format!("authentication failed: {message}").into());
-        }
-        other => {
-            return Err(format!("unexpected response: {other:?}").into());
         }
     }
 
     if !cli.command.is_empty() {
-        // Remote command uses framed Session channel
-        let mut channel = Channel::open(&conn, ChannelType::Session).await?;
-        match channel.recv().await? {
-            ChannelMsg::ChannelOpenConfirm => {}
-            ChannelMsg::ChannelOpenFailure { description, .. } => {
-                return Err(format!("channel open failed: {description}").into());
-            }
-            other => {
-                return Err(format!("unexpected: {other:?}").into());
-            }
-        }
         let cmd = cli.command.join(" ");
-        return run_remote_command(&mut channel, &cmd).await;
+        return run_remote_command(&conn, &cmd).await;
     }
 
     // Interactive shell via raw QUIC streams
@@ -205,21 +187,15 @@ async fn reconnect_raw_shell(
 
     let conn = squic::dial(addr, server_pubkey.as_bytes(), squic_config).await?;
 
-    let mut control = ControlChannel::open(&conn).await?;
-    control
-        .send(&ControlMsg::AuthRequest {
-            username: user.clone(),
-            pubkey: verifying_key.as_bytes().to_vec(),
-        })
+    let (mut auth_send, mut auth_recv) = conn.open_bi().await?;
+    auth_send
+        .write_all(&protocol::encode_auth_request(&user, verifying_key.as_bytes()))
         .await?;
 
-    match control.recv().await? {
-        ControlMsg::AuthSuccess => {}
-        ControlMsg::AuthFailure { message } => {
+    match protocol::decode_auth_response(&mut auth_recv).await? {
+        protocol::AuthResponseData::Success => {}
+        protocol::AuthResponseData::Failure { message } => {
             return Err(format!("authentication failed: {message}").into());
-        }
-        other => {
-            return Err(format!("unexpected response: {other:?}").into());
         }
     }
 
@@ -365,36 +341,73 @@ async fn run_raw_shell(
 }
 
 async fn run_remote_command(
-    channel: &mut Channel,
+    conn: &quinn::Connection,
     command: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    channel
-        .send(&ChannelMsg::ExecRequest {
-            command: command.to_string(),
-        })
-        .await?;
+    // Open bidi stream: [RAW_EXEC][2 bytes cmd_len][command]
+    let (mut send, mut recv) = conn.open_bi().await?;
+    let cmd_bytes = command.as_bytes();
+    let mut header = Vec::with_capacity(1 + 2 + cmd_bytes.len());
+    header.push(protocol::RAW_EXEC);
+    header.extend_from_slice(&(cmd_bytes.len() as u16).to_be_bytes());
+    header.extend_from_slice(cmd_bytes);
+    send.write_all(&header).await?;
+    send.finish()?;
 
-    let mut exit_code = 0u32;
+    // Accept stderr uni stream from server
+    let conn_clone = conn.clone();
+    let stderr_task = tokio::spawn(async move {
+        if let Ok(mut uni_recv) = conn_clone.accept_uni().await {
+            let mut type_buf = [0u8; 1];
+            if uni_recv.read_exact(&mut type_buf).await.is_ok()
+                && type_buf[0] == protocol::RAW_EXEC_STDERR
+            {
+                let mut buf = vec![0u8; 8192];
+                loop {
+                    match uni_recv.read(&mut buf).await {
+                        Ok(Some(n)) => {
+                            let mut stderr = tokio::io::stderr();
+                            let _ = stderr.write_all(&buf[..n]).await;
+                            let _ = stderr.flush().await;
+                        }
+                        _ => break,
+                    }
+                }
+            }
+        }
+    });
+
+    // Read stdout from bidi recv, holding back a 4-byte tail for exit code.
+    // Server writes: [raw stdout bytes...][4 bytes exit_code] then finishes.
+    let mut tail = Vec::new();
+    let mut buf = vec![0u8; 8192];
 
     loop {
-        match channel.recv().await? {
-            ChannelMsg::Data { payload } => {
-                let mut stdout = tokio::io::stdout();
-                stdout.write_all(&payload).await?;
-                stdout.flush().await?;
+        match recv.read(&mut buf).await {
+            Ok(Some(n)) => {
+                tail.extend_from_slice(&buf[..n]);
+                if tail.len() > 4 {
+                    let flush_len = tail.len() - 4;
+                    let mut stdout = tokio::io::stdout();
+                    stdout.write_all(&tail[..flush_len]).await?;
+                    stdout.flush().await?;
+                    tail.drain(..flush_len);
+                }
             }
-            ChannelMsg::ExtendedData { payload, .. } => {
-                let mut stderr = tokio::io::stderr();
-                stderr.write_all(&payload).await?;
-                stderr.flush().await?;
-            }
-            ChannelMsg::ExitStatus { code } => {
-                exit_code = code;
-            }
-            ChannelMsg::Eof | ChannelMsg::Close => break,
-            _ => {}
+            Ok(None) => break,
+            Err(e) => return Err(format!("read error: {e}").into()),
         }
     }
+
+    stderr_task.abort();
+
+    // Extract exit code from last 4 bytes
+    let exit_code = if tail.len() >= 4 {
+        let off = tail.len() - 4;
+        u32::from_be_bytes([tail[off], tail[off + 1], tail[off + 2], tail[off + 3]])
+    } else {
+        0
+    };
 
     if exit_code != 0 {
         std::process::exit(exit_code as i32);

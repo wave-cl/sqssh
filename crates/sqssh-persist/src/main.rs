@@ -34,6 +34,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::remove_file(socket_path).ok();
 
     let listener = UnixListener::bind(socket_path)?;
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600))?;
+    }
     tracing::info!("listening on {SOCKET_PATH}");
 
     // Phase 1: receive fds from sqsshd

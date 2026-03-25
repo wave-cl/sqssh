@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use clap::Parser;
 use sqssh_core::keys;
-use sqssh_core::protocol::{ctl_decode, ctl_encode, AgentRequest, AgentResponse};
+use sqssh_core::protocol::{AgentRequest, AgentResponse};
 
 #[derive(Parser)]
 #[command(name = "sqssh-add", about = "Add keys to sqssh-agent")]
@@ -49,10 +49,10 @@ fn send_request(
     let mut stream = UnixStream::connect(&socket_path)
         .map_err(|e| format!("could not connect to agent at {}: {e}", socket_path.display()))?;
 
-    let data = ctl_encode(request)?;
+    let data = request.encode();
     stream.write_all(&data)?;
 
-    let response: AgentResponse = ctl_decode(&mut stream)?;
+    let response = AgentResponse::decode(&mut stream)?;
     Ok(response)
 }
 

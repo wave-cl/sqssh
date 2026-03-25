@@ -7,9 +7,9 @@ use clap::Parser;
 use ed25519_dalek::SigningKey;
 use sqssh_core::keys;
 use sqssh_core::protocol::{
-    ctl_encode, AgentKeyEntry, AgentRequest, AgentResponse,
+    AgentKeyEntry, AgentRequest, AgentResponse,
 };
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
 
 #[derive(Parser)]
@@ -100,18 +100,12 @@ async fn handle_client(
     mut stream: tokio::net::UnixStream,
     state: &AgentState,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // Read request
-    let mut len_buf = [0u8; 4];
-    stream.read_exact(&mut len_buf).await?;
-    let len = u32::from_be_bytes(len_buf) as usize;
-    let mut payload = vec![0u8; len];
-    stream.read_exact(&mut payload).await?;
-
-    let request: AgentRequest = rmp_serde::from_slice(&payload)?;
+    // Read request (binary)
+    let request = AgentRequest::decode_async(&mut stream).await?;
     let response = handle_request(request, state).await;
 
-    // Send response
-    let resp_data = ctl_encode(&response)?;
+    // Send response (binary)
+    let resp_data = response.encode();
     stream.write_all(&resp_data).await?;
 
     Ok(())

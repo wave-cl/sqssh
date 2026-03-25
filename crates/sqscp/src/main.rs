@@ -7,10 +7,9 @@ use std::time::Instant;
 use clap::Parser;
 use sqssh_core::client;
 use sqssh_core::protocol::{
-    self, ChannelType, RawChunkHeader, RawFileHeader, RAW_CHUNK_SIZE,
+    self, RawChunkHeader, RawFileHeader, RAW_CHUNK_SIZE,
     RAW_DOWNLOAD_CHUNK, RAW_DOWNLOAD_DATA, RAW_MANIFEST_RESPONSE, RAW_TRANSFER_RESULT,
 };
-use sqssh_core::stream::Channel;
 use tokio::sync::Semaphore;
 
 #[derive(Parser)]
@@ -271,8 +270,20 @@ async fn upload(
         );
     }
 
-    // Connection drops naturally when Arc is released.
-    // Stream data is flushed by stopped() in upload_file_raw/upload_file_chunked.
+    // Wait for all streams to be fully received by the server.
+    // Send the number of files we uploaded in the sync request so the server
+    // can wait until it has received all uni streams before replying.
+    let (mut sync_send, mut sync_recv) = conn
+        .open_bi()
+        .await
+        .map_err(|e| format!("sync stream: {e}"))?;
+    let file_count = files_total as u32;
+    let mut sync_msg = vec![0xFE];
+    sync_msg.extend_from_slice(&file_count.to_be_bytes());
+    sync_send.write_all(&sync_msg).await.map_err(|e| format!("sync write: {e}"))?;
+    sync_send.finish().map_err(|e| format!("sync finish: {e}"))?;
+    let mut buf = [0u8; 1];
+    let _ = sync_recv.read_exact(&mut buf).await; // wait for server ack
 
     if errors > 0 {
         Err(format!("{errors} file(s) failed").into())
@@ -354,9 +365,6 @@ async fn upload_file_raw(
     // FIN = EOF, then wait for peer to process all data
     send.finish()
         .map_err(|e| format!("finish error: {e}"))?;
-    // stopped() resolves when the peer has read all data (stream fully drained)
-    // or when they send STOP_SENDING
-    // Don't wait for stopped() — finish() sends FIN, peer acks naturally.
 
     Ok(())
 }
@@ -452,7 +460,6 @@ async fn upload_file_chunked(
             }
 
             send.finish().map_err(|e| format!("finish: {e}"))?;
-            // Don't wait for stopped() — finish() sends FIN, peer acks naturally.
             Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
         });
 
@@ -484,30 +491,21 @@ async fn download(
     let remote_path = remote.path.as_deref().unwrap_or(".");
     let conn = Arc::new(conn.conn);
 
-    // Open bidi channel with RawDownload request
-    let mut channel = Channel::open(
-        &conn,
-        ChannelType::RawDownload {
-            path: remote_path.to_string(),
-            jobs: cli.jobs as u32,
-        },
-    )
-    .await?;
+    // Open raw bidi stream: [RAW_DOWNLOAD_REQUEST][2 bytes path_len][path][4 bytes jobs]
+    let (mut dl_send, mut dl_recv) = conn.open_bi().await
+        .map_err(|e| format!("failed to open download stream: {e}"))?;
+    let path_bytes = remote_path.as_bytes();
+    let mut header = Vec::with_capacity(1 + 2 + path_bytes.len() + 4);
+    header.push(protocol::RAW_DOWNLOAD_REQUEST);
+    header.extend_from_slice(&(path_bytes.len() as u16).to_be_bytes());
+    header.extend_from_slice(path_bytes);
+    header.extend_from_slice(&(cli.jobs as u32).to_be_bytes());
+    dl_send.write_all(&header).await
+        .map_err(|e| format!("failed to write download request: {e}"))?;
 
-    // Wait for confirm
-    match channel.recv().await? {
-        sqssh_core::protocol::ChannelMsg::ChannelOpenConfirm => {}
-        sqssh_core::protocol::ChannelMsg::ChannelOpenFailure { description, .. } => {
-            return Err(format!("channel open failed: {description}").into());
-        }
-        other => {
-            return Err(format!("unexpected: {other:?}").into());
-        }
-    }
-
-    // Read response type from raw bytes on the channel's recv stream
+    // Read response type from server
     let mut type_buf = [0u8; 1];
-    channel.recv_stream().read_exact(&mut type_buf).await
+    dl_recv.read_exact(&mut type_buf).await
         .map_err(|e| format!("failed to read response type: {e}"))?;
 
     match type_buf[0] {
@@ -517,7 +515,7 @@ async fn download(
                 return Err("remote path is a directory (use -r)".into());
             }
 
-            let entries = protocol::decode_manifest_response(channel.recv_stream()).await?;
+            let entries = protocol::decode_manifest_response(&mut dl_recv).await?;
 
             let source_dir_name = Path::new(remote_path)
                 .file_name()
@@ -643,7 +641,7 @@ async fn download(
         RAW_DOWNLOAD_CHUNK => {
             // Single file, chunked across multiple uni streams
             // Read the first chunk header from the bidi to get file metadata
-            let first_header = RawChunkHeader::decode(channel.recv_stream()).await?;
+            let first_header = RawChunkHeader::decode(&mut dl_recv).await?;
 
             let dest = if Path::new(local_dest).is_dir() {
                 PathBuf::from(local_dest).join(&first_header.path)
@@ -724,7 +722,7 @@ async fn download(
             }
         }
         RAW_TRANSFER_RESULT => {
-            let (success, message) = protocol::decode_transfer_result(channel.recv_stream()).await?;
+            let (success, message) = protocol::decode_transfer_result(&mut dl_recv).await?;
             if !success {
                 return Err(format!("remote error: {message}").into());
             }

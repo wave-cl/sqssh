@@ -10,5 +10,4 @@ path = "src/main.rs"
 [dependencies]
 sqssh-core = { workspace = true }
 clap = { workspace = true }
-rmp-serde = { workspace = true }
 ed25519-dalek = { workspace = true }

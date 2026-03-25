@@ -6,7 +6,6 @@ use argon2::Argon2;
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use ed25519_dalek::{SigningKey, VerifyingKey};
-use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::error::{Error, Result};
@@ -15,21 +14,42 @@ const PRIVATE_KEY_HEADER: &str = "SQSSH-ED25519-PRIVATE-KEY";
 const ENCRYPTED_KEY_HEADER: &str = "SQSSH-ED25519-ENCRYPTED-KEY";
 const PUBLIC_KEY_PREFIX: &str = "sqssh-ed25519";
 
-/// Encrypted key blob serialized as msgpack.
-#[derive(Serialize, Deserialize)]
+/// Encrypted key blob.
+/// Binary format: [4 m_cost][4 t_cost][4 p_cost][16 salt][12 nonce][remaining: ciphertext]
 struct EncryptedKeyBlob {
-    /// Argon2 memory cost in KiB
     m_cost: u32,
-    /// Argon2 time cost (iterations)
     t_cost: u32,
-    /// Argon2 parallelism
     p_cost: u32,
-    /// Random salt (16 bytes)
     salt: Vec<u8>,
-    /// ChaCha20-Poly1305 nonce (12 bytes)
     nonce: Vec<u8>,
-    /// Encrypted seed + poly1305 tag (48 bytes)
     ciphertext: Vec<u8>,
+}
+
+impl EncryptedKeyBlob {
+    fn encode(&self) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(12 + self.salt.len() + self.nonce.len() + self.ciphertext.len());
+        buf.extend_from_slice(&self.m_cost.to_be_bytes());
+        buf.extend_from_slice(&self.t_cost.to_be_bytes());
+        buf.extend_from_slice(&self.p_cost.to_be_bytes());
+        buf.extend_from_slice(&self.salt);
+        buf.extend_from_slice(&self.nonce);
+        buf.extend_from_slice(&self.ciphertext);
+        buf
+    }
+
+    fn decode(data: &[u8]) -> std::result::Result<Self, String> {
+        // Binary format: [4 m_cost][4 t_cost][4 p_cost][16 salt][12 nonce][ciphertext]
+        if data.len() < 40 {
+            return Err("encrypted key blob too short".into());
+        }
+        let m_cost = u32::from_be_bytes(data[0..4].try_into().unwrap());
+        let t_cost = u32::from_be_bytes(data[4..8].try_into().unwrap());
+        let p_cost = u32::from_be_bytes(data[8..12].try_into().unwrap());
+        let salt = data[12..28].to_vec();
+        let nonce = data[28..40].to_vec();
+        let ciphertext = data[40..].to_vec();
+        Ok(Self { m_cost, t_cost, p_cost, salt, nonce, ciphertext })
+    }
 }
 
 /// Generate a new Ed25519 keypair.
@@ -146,16 +166,15 @@ fn encrypt_seed(seed: &[u8; 32], passphrase: &str) -> Result<String> {
         ciphertext,
     };
 
-    let encoded = rmp_serde::to_vec(&blob)
-        .map_err(|e| Error::Serialization(e.to_string()))?;
+    let encoded = blob.encode();
     Ok(bs58::encode(encoded).into_string())
 }
 
 /// Decrypt an encrypted key blob with a passphrase.
 fn decrypt_seed(encrypted_b58: &str, passphrase: &str) -> Result<SigningKey> {
     let encoded = bs58::decode(encrypted_b58).into_vec()?;
-    let blob: EncryptedKeyBlob = rmp_serde::from_slice(&encoded)
-        .map_err(|e| Error::Serialization(e.to_string()))?;
+    let blob = EncryptedKeyBlob::decode(&encoded)
+        .map_err(|e| Error::InvalidKeyFormat(e))?;
 
     if blob.salt.len() != 16 || blob.nonce.len() != 12 {
         return Err(Error::InvalidKeyFormat("invalid encrypted key blob".into()));
@@ -336,8 +355,9 @@ pub fn ensure_sqssh_dir() -> Result<std::path::PathBuf> {
     let dir = sqssh_dir()?;
     if !dir.exists() {
         fs::create_dir_all(&dir)?;
-        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
     }
+    // Always enforce 700 — even if the directory pre-existed with wrong permissions
+    fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
     Ok(dir)
 }
 
@@ -384,6 +404,11 @@ pub fn save_key_mapping(host: &str, key_name: &str) -> Result<()> {
         content.push_str(&format!("{h} {k}\n"));
     }
     fs::write(&path, content)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+    }
     Ok(())
 }
 

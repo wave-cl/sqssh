@@ -82,6 +82,17 @@ impl KnownHosts {
 
     /// Save the database to a file.
     pub fn save(&self, path: &Path) -> Result<()> {
+        // Ensure parent directory exists with correct permissions
+        if let Some(parent) = path.parent() {
+            if !parent.exists() {
+                fs::create_dir_all(parent)?;
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+            }
+        }
         let mut content = String::new();
         for entry in &self.entries {
             let encoded = encode_pubkey(&entry.pubkey);
@@ -92,6 +103,11 @@ impl KnownHosts {
             }
         }
         fs::write(path, content)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o644))?;
+        }
         Ok(())
     }
 

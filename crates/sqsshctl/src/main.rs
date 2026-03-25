@@ -50,14 +50,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let mut stream = UnixStream::connect(&cli.socket)
         .map_err(|e| format!("failed to connect to {}: {e}", cli.socket.display()))?;
 
-    // Send request
-    let payload = rmp_serde::to_vec(&request)?;
-    let len = (payload.len() as u32).to_be_bytes();
-    stream.write_all(&len)?;
-    stream.write_all(&payload)?;
+    // Send request (binary)
+    let data = request.encode();
+    stream.write_all(&data)?;
 
-    // Read response
-    let response: CtlResponse = sqssh_core::protocol::ctl_decode(&mut stream)?;
+    // Read response (binary)
+    let response = CtlResponse::decode(&mut stream)?;
 
     match response {
         CtlResponse::Ok { message } => {

@@ -1,10 +1,4 @@
-use bytes::{BufMut, Bytes, BytesMut};
-use serde::{Deserialize, Serialize};
-
 use crate::error::{Error, Result};
-
-/// Maximum message payload size (16 MB).
-pub const MAX_MESSAGE_SIZE: u32 = 16 * 1024 * 1024;
 
 /// ALPN protocol identifier.
 pub const ALPN: &[u8] = b"sqssh/1";
@@ -12,122 +6,7 @@ pub const ALPN: &[u8] = b"sqssh/1";
 /// Default sqssh port (UDP).
 pub const DEFAULT_PORT: u16 = 22;
 
-// -- Message type discriminants --
-
-const MSG_AUTH_REQUEST: u8 = 0x01;
-const MSG_AUTH_SUCCESS: u8 = 0x02;
-const MSG_AUTH_FAILURE: u8 = 0x03;
-const MSG_CHANNEL_OPEN: u8 = 0x30;
-const MSG_CHANNEL_OPEN_CONFIRM: u8 = 0x31;
-const MSG_CHANNEL_OPEN_FAILURE: u8 = 0x32;
-const MSG_PTY_REQUEST: u8 = 0x40;
-const MSG_PTY_SUCCESS: u8 = 0x41;
-const MSG_SHELL_REQUEST: u8 = 0x42;
-const MSG_EXEC_REQUEST: u8 = 0x43;
-const MSG_DATA: u8 = 0x50;
-const MSG_EXTENDED_DATA: u8 = 0x51;
-const MSG_WINDOW_CHANGE: u8 = 0x60;
-const MSG_EXIT_STATUS: u8 = 0x62;
-const MSG_FILE_HEADER: u8 = 0x80;
-const MSG_FILE_RESULT: u8 = 0x81;
-const MSG_FILE_MANIFEST: u8 = 0x82;
-const MSG_EOF: u8 = 0x70;
-const MSG_CLOSE: u8 = 0x71;
-
-// -- Control channel messages (stream 0) --
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ControlMsg {
-    AuthRequest {
-        username: String,
-        pubkey: Vec<u8>,
-    },
-    AuthSuccess,
-    AuthFailure {
-        message: String,
-    },
-}
-
-// -- Channel messages (per-channel bidi streams) --
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum TransferDirection {
-    Upload,
-    Download,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ChannelType {
-    Session,
-    FileTransfer {
-        direction: TransferDirection,
-        path: String,
-    },
-    /// Raw download: server sends file data on uni streams.
-    /// Client opens bidi channel, server responds with manifest or single-file signal.
-    RawDownload {
-        path: String,
-        /// Number of parallel streams for single-file chunked transfer.
-        jobs: u32,
-    },
-    Sftp,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum ChannelMsg {
-    ChannelOpen {
-        channel_type: ChannelType,
-    },
-    ChannelOpenConfirm,
-    ChannelOpenFailure {
-        reason: u32,
-        description: String,
-    },
-    PtyRequest {
-        term: String,
-        cols: u32,
-        rows: u32,
-    },
-    PtySuccess,
-    ShellRequest,
-    ExecRequest {
-        command: String,
-    },
-    Data {
-        payload: Vec<u8>,
-    },
-    ExtendedData {
-        data_type: u32,
-        payload: Vec<u8>,
-    },
-    WindowChange {
-        cols: u32,
-        rows: u32,
-    },
-    ExitStatus {
-        code: u32,
-    },
-    FileHeader {
-        path: String,
-        size: u64,
-        mode: u32,
-        /// Modification time (seconds since epoch). 0 = not preserved.
-        mtime: u64,
-        /// Access time (seconds since epoch). 0 = not preserved.
-        atime: u64,
-    },
-    FileResult {
-        success: bool,
-        message: String,
-    },
-    FileManifest {
-        entries: Vec<ManifestEntry>,
-    },
-    Eof,
-    Close,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ManifestEntry {
     pub path: String,
     pub size: u64,
@@ -137,212 +16,195 @@ pub struct ManifestEntry {
     pub atime: u64,
 }
 
-// -- Wire encoding/decoding --
-
-impl ControlMsg {
-    fn msg_type(&self) -> u8 {
-        match self {
-            Self::AuthRequest { .. } => MSG_AUTH_REQUEST,
-            Self::AuthSuccess => MSG_AUTH_SUCCESS,
-            Self::AuthFailure { .. } => MSG_AUTH_FAILURE,
-        }
-    }
-
-    /// Encode to wire format: [4-byte length][1-byte type][msgpack payload]
-    pub fn encode(&self) -> Result<Bytes> {
-        let payload =
-            rmp_serde::to_vec(self).map_err(|e| Error::Serialization(e.to_string()))?;
-        let total_len = 1 + payload.len();
-        let mut buf = BytesMut::with_capacity(4 + total_len);
-        buf.put_u32(total_len as u32);
-        buf.put_u8(self.msg_type());
-        buf.put_slice(&payload);
-        Ok(buf.freeze())
-    }
-
-    /// Decode from wire format (after length prefix has been read).
-    pub fn decode(msg_type: u8, payload: &[u8]) -> Result<Self> {
-        let msg: Self =
-            rmp_serde::from_slice(payload).map_err(|e| Error::Serialization(e.to_string()))?;
-
-        // Verify the decoded variant matches the wire type
-        if msg.msg_type() != msg_type {
-            return Err(Error::Protocol(format!(
-                "message type mismatch: wire={msg_type:#x}, decoded={:#x}",
-                msg.msg_type()
-            )));
-        }
-
-        Ok(msg)
-    }
-}
-
-impl ChannelMsg {
-    fn msg_type(&self) -> u8 {
-        match self {
-            Self::ChannelOpen { .. } => MSG_CHANNEL_OPEN,
-            Self::ChannelOpenConfirm => MSG_CHANNEL_OPEN_CONFIRM,
-            Self::ChannelOpenFailure { .. } => MSG_CHANNEL_OPEN_FAILURE,
-            Self::PtyRequest { .. } => MSG_PTY_REQUEST,
-            Self::PtySuccess => MSG_PTY_SUCCESS,
-            Self::ShellRequest => MSG_SHELL_REQUEST,
-            Self::ExecRequest { .. } => MSG_EXEC_REQUEST,
-            Self::Data { .. } => MSG_DATA,
-            Self::ExtendedData { .. } => MSG_EXTENDED_DATA,
-            Self::WindowChange { .. } => MSG_WINDOW_CHANGE,
-            Self::ExitStatus { .. } => MSG_EXIT_STATUS,
-            Self::FileHeader { .. } => MSG_FILE_HEADER,
-            Self::FileResult { .. } => MSG_FILE_RESULT,
-            Self::FileManifest { .. } => MSG_FILE_MANIFEST,
-            Self::Eof => MSG_EOF,
-            Self::Close => MSG_CLOSE,
-        }
-    }
-
-    /// Encode to wire format.
-    pub fn encode(&self) -> Result<Bytes> {
-        let payload =
-            rmp_serde::to_vec(self).map_err(|e| Error::Serialization(e.to_string()))?;
-        let total_len = 1 + payload.len();
-        let mut buf = BytesMut::with_capacity(4 + total_len);
-        buf.put_u32(total_len as u32);
-        buf.put_u8(self.msg_type());
-        buf.put_slice(&payload);
-        Ok(buf.freeze())
-    }
-
-    /// Decode from wire format (after length prefix has been read).
-    pub fn decode(msg_type: u8, payload: &[u8]) -> Result<Self> {
-        let msg: Self =
-            rmp_serde::from_slice(payload).map_err(|e| Error::Serialization(e.to_string()))?;
-
-        if msg.msg_type() != msg_type {
-            return Err(Error::Protocol(format!(
-                "message type mismatch: wire={msg_type:#x}, decoded={:#x}",
-                msg.msg_type()
-            )));
-        }
-
-        Ok(msg)
-    }
-}
-
-/// Read a single framed message from a QUIC receive stream.
-/// Returns (msg_type, payload_bytes).
-pub async fn read_frame(
-    recv: &mut quinn::RecvStream,
-) -> Result<(u8, Vec<u8>)> {
-    let mut len_buf = [0u8; 4];
-    recv.read_exact(&mut len_buf)
-        .await
-        .map_err(|e| Error::Connection(format!("failed to read frame length: {e}")))?;
-    let len = u32::from_be_bytes(len_buf);
-
-    if len == 0 {
-        return Err(Error::Protocol("zero-length frame".into()));
-    }
-    if len > MAX_MESSAGE_SIZE {
-        return Err(Error::Protocol(format!(
-            "frame too large: {len} > {MAX_MESSAGE_SIZE}"
-        )));
-    }
-
-    let mut data = vec![0u8; len as usize];
-    recv.read_exact(&mut data)
-        .await
-        .map_err(|e| Error::Connection(format!("failed to read frame data: {e}")))?;
-
-    let msg_type = data[0];
-    let payload = data[1..].to_vec();
-
-    Ok((msg_type, payload))
-}
-
-/// Write a pre-encoded frame to a QUIC send stream.
-pub async fn write_frame(
-    send: &mut quinn::SendStream,
-    data: &[u8],
-) -> Result<()> {
-    send.write_all(data)
-        .await
-        .map_err(|e| Error::Connection(format!("failed to write frame: {e}")))?;
-    Ok(())
-}
-
-/// Read a ControlMsg from a QUIC receive stream.
-pub async fn read_control_msg(recv: &mut quinn::RecvStream) -> Result<ControlMsg> {
-    let (msg_type, payload) = read_frame(recv).await?;
-    ControlMsg::decode(msg_type, &payload)
-}
-
-/// Write a ControlMsg to a QUIC send stream.
-pub async fn write_control_msg(
-    send: &mut quinn::SendStream,
-    msg: &ControlMsg,
-) -> Result<()> {
-    let data = msg.encode()?;
-    write_frame(send, &data).await
-}
-
-/// Read a ChannelMsg from a QUIC receive stream.
-pub async fn read_channel_msg(recv: &mut quinn::RecvStream) -> Result<ChannelMsg> {
-    let (msg_type, payload) = read_frame(recv).await?;
-    ChannelMsg::decode(msg_type, &payload)
-}
-
-/// Write a ChannelMsg to a QUIC send stream.
-pub async fn write_channel_msg(
-    send: &mut quinn::SendStream,
-    msg: &ChannelMsg,
-) -> Result<()> {
-    let data = msg.encode()?;
-    write_frame(send, &data).await
-}
-
 // -- Control socket protocol (Unix domain socket, sqsshctl ↔ sqsshd) --
+// Binary format:
+//   Request:  [1 byte type] — 0x01 ReloadKeys, 0x02 ReloadAllKeys
+//   Response: [1 byte type][2 bytes msg_len][message] — 0x10 Ok, 0x11 Error
+
+const CTL_RELOAD_KEYS: u8 = 0x01;
+const CTL_RELOAD_ALL_KEYS: u8 = 0x02;
+const CTL_RESP_OK: u8 = 0x10;
+const CTL_RESP_ERROR: u8 = 0x11;
 
 /// Request from sqsshctl to sqsshd over the control socket.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum CtlRequest {
-    /// Reload the calling user's authorized_keys.
     ReloadKeys,
-    /// Reload all users' authorized_keys (root only).
     ReloadAllKeys,
 }
 
 /// Response from sqsshd to sqsshctl over the control socket.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum CtlResponse {
     Ok { message: String },
     Error { message: String },
 }
 
-/// Encode a control socket message as length-prefixed msgpack.
-pub fn ctl_encode<T: Serialize>(msg: &T) -> Result<Vec<u8>> {
-    let payload = rmp_serde::to_vec(msg)
-        .map_err(|e| Error::Serialization(e.to_string()))?;
-    let len = payload.len() as u32;
-    let mut buf = Vec::with_capacity(4 + payload.len());
-    buf.extend_from_slice(&len.to_be_bytes());
-    buf.extend_from_slice(&payload);
-    Ok(buf)
+impl CtlRequest {
+    pub fn encode(&self) -> Vec<u8> {
+        match self {
+            Self::ReloadKeys => vec![CTL_RELOAD_KEYS],
+            Self::ReloadAllKeys => vec![CTL_RELOAD_ALL_KEYS],
+        }
+    }
+
+    pub fn decode(reader: &mut impl std::io::Read) -> Result<Self> {
+        let mut buf = [0u8; 1];
+        reader.read_exact(&mut buf)
+            .map_err(|e| Error::Connection(format!("ctl request type: {e}")))?;
+        match buf[0] {
+            CTL_RELOAD_KEYS => Ok(Self::ReloadKeys),
+            CTL_RELOAD_ALL_KEYS => Ok(Self::ReloadAllKeys),
+            other => Err(Error::Protocol(format!("unknown ctl request: {other:#x}"))),
+        }
+    }
+
+    pub async fn decode_async(recv: &mut (impl tokio::io::AsyncReadExt + Unpin)) -> Result<Self> {
+        let mut buf = [0u8; 1];
+        recv.read_exact(&mut buf).await
+            .map_err(|e| Error::Connection(format!("ctl request type: {e}")))?;
+        match buf[0] {
+            CTL_RELOAD_KEYS => Ok(Self::ReloadKeys),
+            CTL_RELOAD_ALL_KEYS => Ok(Self::ReloadAllKeys),
+            other => Err(Error::Protocol(format!("unknown ctl request: {other:#x}"))),
+        }
+    }
 }
 
-/// Decode a control socket message from a blocking reader.
-pub fn ctl_decode<T: for<'de> Deserialize<'de>>(reader: &mut impl std::io::Read) -> Result<T> {
-    let mut len_buf = [0u8; 4];
-    reader.read_exact(&mut len_buf)
-        .map_err(|e| Error::Connection(format!("failed to read ctl frame: {e}")))?;
-    let len = u32::from_be_bytes(len_buf) as usize;
-    if len > MAX_MESSAGE_SIZE as usize {
-        return Err(Error::Protocol("ctl frame too large".into()));
+impl CtlResponse {
+    pub fn encode(&self) -> Vec<u8> {
+        match self {
+            Self::Ok { message } | Self::Error { message } => {
+                let typ = if matches!(self, Self::Ok { .. }) { CTL_RESP_OK } else { CTL_RESP_ERROR };
+                let mb = message.as_bytes();
+                let mut buf = Vec::with_capacity(1 + 2 + mb.len());
+                buf.push(typ);
+                buf.extend_from_slice(&(mb.len() as u16).to_be_bytes());
+                buf.extend_from_slice(mb);
+                buf
+            }
+        }
     }
-    let mut payload = vec![0u8; len];
-    reader.read_exact(&mut payload)
-        .map_err(|e| Error::Connection(format!("failed to read ctl payload: {e}")))?;
-    rmp_serde::from_slice(&payload)
-        .map_err(|e| Error::Serialization(e.to_string()))
+
+    pub fn decode(reader: &mut impl std::io::Read) -> Result<Self> {
+        let mut type_buf = [0u8; 1];
+        reader.read_exact(&mut type_buf)
+            .map_err(|e| Error::Connection(format!("ctl response type: {e}")))?;
+        let mut len_buf = [0u8; 2];
+        reader.read_exact(&mut len_buf)
+            .map_err(|e| Error::Connection(format!("ctl response len: {e}")))?;
+        let len = u16::from_be_bytes(len_buf) as usize;
+        let mut msg_buf = vec![0u8; len];
+        if len > 0 {
+            reader.read_exact(&mut msg_buf)
+                .map_err(|e| Error::Connection(format!("ctl response msg: {e}")))?;
+        }
+        let message = String::from_utf8(msg_buf).unwrap_or_default();
+        match type_buf[0] {
+            CTL_RESP_OK => Ok(Self::Ok { message }),
+            CTL_RESP_ERROR => Ok(Self::Error { message }),
+            other => Err(Error::Protocol(format!("unknown ctl response: {other:#x}"))),
+        }
+    }
 }
+
+// -- Raw auth protocol (bidi stream 0) --
+
+/// Auth request type byte.
+pub const AUTH_REQUEST: u8 = 0x01;
+/// Auth success type byte.
+pub const AUTH_SUCCESS: u8 = 0x02;
+/// Auth failure type byte.
+pub const AUTH_FAILURE: u8 = 0x03;
+
+/// Encode an auth request: [1 byte: AUTH_REQUEST][2 bytes username_len][username][32 bytes pubkey]
+pub fn encode_auth_request(username: &str, pubkey: &[u8; 32]) -> Vec<u8> {
+    let uname = username.as_bytes();
+    let mut buf = Vec::with_capacity(1 + 2 + uname.len() + 32);
+    buf.push(AUTH_REQUEST);
+    buf.extend_from_slice(&(uname.len() as u16).to_be_bytes());
+    buf.extend_from_slice(uname);
+    buf.extend_from_slice(pubkey);
+    buf
+}
+
+/// Encode an auth success response: [1 byte: AUTH_SUCCESS]
+pub fn encode_auth_success() -> Vec<u8> {
+    vec![AUTH_SUCCESS]
+}
+
+/// Encode an auth failure response: [1 byte: AUTH_FAILURE][2 bytes msg_len][message]
+pub fn encode_auth_failure(message: &str) -> Vec<u8> {
+    let msg = message.as_bytes();
+    let mut buf = Vec::with_capacity(1 + 2 + msg.len());
+    buf.push(AUTH_FAILURE);
+    buf.extend_from_slice(&(msg.len() as u16).to_be_bytes());
+    buf.extend_from_slice(msg);
+    buf
+}
+
+/// Decoded auth request fields.
+pub struct AuthRequestData {
+    pub username: String,
+    pub pubkey: [u8; 32],
+}
+
+/// Decode an auth request from a recv stream (type byte already consumed).
+pub async fn decode_auth_request(recv: &mut quinn::RecvStream) -> Result<AuthRequestData> {
+    let mut ulen_buf = [0u8; 2];
+    recv.read_exact(&mut ulen_buf).await
+        .map_err(|e| Error::Connection(format!("auth request username len: {e}")))?;
+    let ulen = u16::from_be_bytes(ulen_buf) as usize;
+    if ulen > 256 {
+        return Err(Error::Protocol("username too long".into()));
+    }
+    let mut uname_buf = vec![0u8; ulen];
+    recv.read_exact(&mut uname_buf).await
+        .map_err(|e| Error::Connection(format!("auth request username: {e}")))?;
+    let username = String::from_utf8(uname_buf)
+        .map_err(|_| Error::Protocol("invalid UTF-8 in username".into()))?;
+    let mut pubkey = [0u8; 32];
+    recv.read_exact(&mut pubkey).await
+        .map_err(|e| Error::Connection(format!("auth request pubkey: {e}")))?;
+    Ok(AuthRequestData { username, pubkey })
+}
+
+/// Decoded auth response.
+pub enum AuthResponseData {
+    Success,
+    Failure { message: String },
+}
+
+/// Decode an auth response from a recv stream (reads type byte).
+pub async fn decode_auth_response(recv: &mut quinn::RecvStream) -> Result<AuthResponseData> {
+    let mut type_buf = [0u8; 1];
+    recv.read_exact(&mut type_buf).await
+        .map_err(|e| Error::Connection(format!("auth response type: {e}")))?;
+    match type_buf[0] {
+        AUTH_SUCCESS => Ok(AuthResponseData::Success),
+        AUTH_FAILURE => {
+            let mut mlen_buf = [0u8; 2];
+            recv.read_exact(&mut mlen_buf).await
+                .map_err(|e| Error::Connection(format!("auth failure msg len: {e}")))?;
+            let mlen = u16::from_be_bytes(mlen_buf) as usize;
+            let mut msg_buf = vec![0u8; mlen];
+            if mlen > 0 {
+                recv.read_exact(&mut msg_buf).await
+                    .map_err(|e| Error::Connection(format!("auth failure msg: {e}")))?;
+            }
+            let message = String::from_utf8(msg_buf).unwrap_or_default();
+            Ok(AuthResponseData::Failure { message })
+        }
+        other => Err(Error::Protocol(format!("unknown auth response type: {other:#x}"))),
+    }
+}
+
+// -- Raw exec protocol --
+
+/// Stream type byte: raw exec (client opens bidi stream).
+pub const RAW_EXEC: u8 = 0xB2;
+/// Stream type byte: raw exec stderr (server opens uni stream).
+pub const RAW_EXEC_STDERR: u8 = 0xB3;
 
 // -- Raw file transfer protocol (uni streams, no msgpack) --
 
@@ -1032,24 +894,41 @@ impl SftpResp {
 }
 
 // -- Agent protocol (Unix domain socket, sqssh-agent) --
+// Binary format:
+//   Request:
+//     0x01 AddKey:    [1][32 bytes seed][2 bytes comment_len][comment]
+//     0x02 RemoveKey: [1][32 bytes pubkey]
+//     0x03 RemoveAll: [1]
+//     0x04 ListKeys:  [1]
+//     0x05 GetSeed:   [1][32 bytes pubkey]
+//   Response:
+//     0x10 Ok:    [1]
+//     0x11 Error: [1][2 bytes msg_len][message]
+//     0x12 Keys:  [1][4 bytes count][entries: 32 bytes pubkey + 2 bytes comment_len + comment]
+//     0x13 Seed:  [1][32 bytes seed]
+
+const AGENT_ADD_KEY: u8 = 0x01;
+const AGENT_REMOVE_KEY: u8 = 0x02;
+const AGENT_REMOVE_ALL: u8 = 0x03;
+const AGENT_LIST_KEYS: u8 = 0x04;
+const AGENT_GET_SEED: u8 = 0x05;
+const AGENT_RESP_OK: u8 = 0x10;
+const AGENT_RESP_ERROR: u8 = 0x11;
+const AGENT_RESP_KEYS: u8 = 0x12;
+const AGENT_RESP_SEED: u8 = 0x13;
 
 /// Request from sqssh-add or client to sqssh-agent.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum AgentRequest {
-    /// Add a key to the agent. Seed is the 32-byte Ed25519 private key seed.
     AddKey { seed: Vec<u8>, comment: String },
-    /// Remove a specific key by its public key bytes.
     RemoveKey { pubkey: Vec<u8> },
-    /// Remove all keys.
     RemoveAll,
-    /// List all loaded keys.
     ListKeys,
-    /// Get the private key seed for QUIC handshake (returns seed bytes).
     GetSeed { pubkey: Vec<u8> },
 }
 
 /// Response from sqssh-agent.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub enum AgentResponse {
     Ok,
     Keys { entries: Vec<AgentKeyEntry> },
@@ -1057,8 +936,208 @@ pub enum AgentResponse {
     Error { message: String },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct AgentKeyEntry {
     pub pubkey: Vec<u8>,
     pub comment: String,
+}
+
+impl AgentRequest {
+    pub fn encode(&self) -> Vec<u8> {
+        match self {
+            Self::AddKey { seed, comment } => {
+                let cb = comment.as_bytes();
+                let mut buf = Vec::with_capacity(1 + 32 + 2 + cb.len());
+                buf.push(AGENT_ADD_KEY);
+                buf.extend_from_slice(seed);
+                buf.extend_from_slice(&(cb.len() as u16).to_be_bytes());
+                buf.extend_from_slice(cb);
+                buf
+            }
+            Self::RemoveKey { pubkey } => {
+                let mut buf = Vec::with_capacity(1 + 32);
+                buf.push(AGENT_REMOVE_KEY);
+                buf.extend_from_slice(pubkey);
+                buf
+            }
+            Self::RemoveAll => vec![AGENT_REMOVE_ALL],
+            Self::ListKeys => vec![AGENT_LIST_KEYS],
+            Self::GetSeed { pubkey } => {
+                let mut buf = Vec::with_capacity(1 + 32);
+                buf.push(AGENT_GET_SEED);
+                buf.extend_from_slice(pubkey);
+                buf
+            }
+        }
+    }
+
+    pub fn decode(reader: &mut impl std::io::Read) -> Result<Self> {
+        let mut type_buf = [0u8; 1];
+        reader.read_exact(&mut type_buf)
+            .map_err(|e| Error::Connection(format!("agent req type: {e}")))?;
+        match type_buf[0] {
+            AGENT_ADD_KEY => {
+                let mut seed = [0u8; 32];
+                reader.read_exact(&mut seed)
+                    .map_err(|e| Error::Connection(format!("agent add seed: {e}")))?;
+                let mut clen = [0u8; 2];
+                reader.read_exact(&mut clen)
+                    .map_err(|e| Error::Connection(format!("agent add comment len: {e}")))?;
+                let cl = u16::from_be_bytes(clen) as usize;
+                let mut cb = vec![0u8; cl];
+                if cl > 0 {
+                    reader.read_exact(&mut cb)
+                        .map_err(|e| Error::Connection(format!("agent add comment: {e}")))?;
+                }
+                Ok(Self::AddKey {
+                    seed: seed.to_vec(),
+                    comment: String::from_utf8(cb).unwrap_or_default(),
+                })
+            }
+            AGENT_REMOVE_KEY => {
+                let mut pubkey = [0u8; 32];
+                reader.read_exact(&mut pubkey)
+                    .map_err(|e| Error::Connection(format!("agent remove pubkey: {e}")))?;
+                Ok(Self::RemoveKey { pubkey: pubkey.to_vec() })
+            }
+            AGENT_REMOVE_ALL => Ok(Self::RemoveAll),
+            AGENT_LIST_KEYS => Ok(Self::ListKeys),
+            AGENT_GET_SEED => {
+                let mut pubkey = [0u8; 32];
+                reader.read_exact(&mut pubkey)
+                    .map_err(|e| Error::Connection(format!("agent get seed pubkey: {e}")))?;
+                Ok(Self::GetSeed { pubkey: pubkey.to_vec() })
+            }
+            other => Err(Error::Protocol(format!("unknown agent req: {other:#x}"))),
+        }
+    }
+
+    pub async fn decode_async(recv: &mut (impl tokio::io::AsyncReadExt + Unpin)) -> Result<Self> {
+        let mut type_buf = [0u8; 1];
+        recv.read_exact(&mut type_buf).await
+            .map_err(|e| Error::Connection(format!("agent req type: {e}")))?;
+        match type_buf[0] {
+            AGENT_ADD_KEY => {
+                let mut seed = [0u8; 32];
+                recv.read_exact(&mut seed).await
+                    .map_err(|e| Error::Connection(format!("agent add seed: {e}")))?;
+                let mut clen = [0u8; 2];
+                recv.read_exact(&mut clen).await
+                    .map_err(|e| Error::Connection(format!("agent add comment len: {e}")))?;
+                let cl = u16::from_be_bytes(clen) as usize;
+                let mut cb = vec![0u8; cl];
+                if cl > 0 {
+                    recv.read_exact(&mut cb).await
+                        .map_err(|e| Error::Connection(format!("agent add comment: {e}")))?;
+                }
+                Ok(Self::AddKey {
+                    seed: seed.to_vec(),
+                    comment: String::from_utf8(cb).unwrap_or_default(),
+                })
+            }
+            AGENT_REMOVE_KEY => {
+                let mut pubkey = [0u8; 32];
+                recv.read_exact(&mut pubkey).await
+                    .map_err(|e| Error::Connection(format!("agent remove pubkey: {e}")))?;
+                Ok(Self::RemoveKey { pubkey: pubkey.to_vec() })
+            }
+            AGENT_REMOVE_ALL => Ok(Self::RemoveAll),
+            AGENT_LIST_KEYS => Ok(Self::ListKeys),
+            AGENT_GET_SEED => {
+                let mut pubkey = [0u8; 32];
+                recv.read_exact(&mut pubkey).await
+                    .map_err(|e| Error::Connection(format!("agent get seed pubkey: {e}")))?;
+                Ok(Self::GetSeed { pubkey: pubkey.to_vec() })
+            }
+            other => Err(Error::Protocol(format!("unknown agent req: {other:#x}"))),
+        }
+    }
+}
+
+impl AgentResponse {
+    pub fn encode(&self) -> Vec<u8> {
+        match self {
+            Self::Ok => vec![AGENT_RESP_OK],
+            Self::Error { message } => {
+                let mb = message.as_bytes();
+                let mut buf = Vec::with_capacity(1 + 2 + mb.len());
+                buf.push(AGENT_RESP_ERROR);
+                buf.extend_from_slice(&(mb.len() as u16).to_be_bytes());
+                buf.extend_from_slice(mb);
+                buf
+            }
+            Self::Keys { entries } => {
+                let mut buf = Vec::new();
+                buf.push(AGENT_RESP_KEYS);
+                buf.extend_from_slice(&(entries.len() as u32).to_be_bytes());
+                for entry in entries {
+                    buf.extend_from_slice(&entry.pubkey);
+                    let cb = entry.comment.as_bytes();
+                    buf.extend_from_slice(&(cb.len() as u16).to_be_bytes());
+                    buf.extend_from_slice(cb);
+                }
+                buf
+            }
+            Self::Seed { seed } => {
+                let mut buf = Vec::with_capacity(1 + 32);
+                buf.push(AGENT_RESP_SEED);
+                buf.extend_from_slice(seed);
+                buf
+            }
+        }
+    }
+
+    pub fn decode(reader: &mut impl std::io::Read) -> Result<Self> {
+        let mut type_buf = [0u8; 1];
+        reader.read_exact(&mut type_buf)
+            .map_err(|e| Error::Connection(format!("agent resp type: {e}")))?;
+        match type_buf[0] {
+            AGENT_RESP_OK => Ok(Self::Ok),
+            AGENT_RESP_ERROR => {
+                let mut mlen = [0u8; 2];
+                reader.read_exact(&mut mlen)
+                    .map_err(|e| Error::Connection(format!("agent error len: {e}")))?;
+                let ml = u16::from_be_bytes(mlen) as usize;
+                let mut mb = vec![0u8; ml];
+                if ml > 0 {
+                    reader.read_exact(&mut mb)
+                        .map_err(|e| Error::Connection(format!("agent error msg: {e}")))?;
+                }
+                Ok(Self::Error { message: String::from_utf8(mb).unwrap_or_default() })
+            }
+            AGENT_RESP_KEYS => {
+                let mut count_buf = [0u8; 4];
+                reader.read_exact(&mut count_buf)
+                    .map_err(|e| Error::Connection(format!("agent keys count: {e}")))?;
+                let count = u32::from_be_bytes(count_buf) as usize;
+                let mut entries = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let mut pk = [0u8; 32];
+                    reader.read_exact(&mut pk)
+                        .map_err(|e| Error::Connection(format!("agent key pubkey: {e}")))?;
+                    let mut clen = [0u8; 2];
+                    reader.read_exact(&mut clen)
+                        .map_err(|e| Error::Connection(format!("agent key comment len: {e}")))?;
+                    let cl = u16::from_be_bytes(clen) as usize;
+                    let mut cb = vec![0u8; cl];
+                    if cl > 0 {
+                        reader.read_exact(&mut cb)
+                            .map_err(|e| Error::Connection(format!("agent key comment: {e}")))?;
+                    }
+                    entries.push(AgentKeyEntry {
+                        pubkey: pk.to_vec(),
+                        comment: String::from_utf8(cb).unwrap_or_default(),
+                    });
+                }
+                Ok(Self::Keys { entries })
+            }
+            AGENT_RESP_SEED => {
+                let mut seed = [0u8; 32];
+                reader.read_exact(&mut seed)
+                    .map_err(|e| Error::Connection(format!("agent seed: {e}")))?;
+                Ok(Self::Seed { seed: seed.to_vec() })
+            }
+            other => Err(Error::Protocol(format!("unknown agent resp: {other:#x}"))),
+        }
+    }
 }
