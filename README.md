@@ -15,6 +15,19 @@ SSH runs over TCP. sqssh runs over sQUIC, which means:
 
 Same port number (22), different protocol (UDP instead of TCP). They coexist.
 
+## Install
+
+```
+curl -fsSL https://raw.githubusercontent.com/wave-cl/sqssh/main/install.sh | sh
+```
+
+Installs to `/usr/local/bin` (root) or `~/.local/bin` (non-root). Supports Linux and macOS on x86_64 and aarch64.
+
+Override the install directory:
+```
+SQSSH_INSTALL_DIR=~/bin curl -fsSL https://raw.githubusercontent.com/wave-cl/sqssh/main/install.sh | sh
+```
+
 ## Tools
 
 | Tool | Status | Description |
@@ -30,19 +43,6 @@ Same port number (22), different protocol (UDP instead of TCP). They coexist.
 | `sqssh-keyscan` | ✓ | Manage known hosts |
 | `sqsftp` | ✓ | Interactive file transfer |
 | `sqssh-persist` | ✓ | PTY fd holder for server restarts |
-
-## Install
-
-```
-curl -fsSL https://raw.githubusercontent.com/wave-cl/sqssh/main/install.sh | sh
-```
-
-Installs to `/usr/local/bin` (root) or `~/.local/bin` (non-root). Supports Linux and macOS on x86_64 and aarch64.
-
-Override the install directory:
-```
-SQSSH_INSTALL_DIR=~/bin curl -fsSL https://raw.githubusercontent.com/wave-cl/sqssh/main/install.sh | sh
-```
 
 ## Quick start
 
