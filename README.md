@@ -8,9 +8,9 @@ SSH runs over TCP. sqssh runs over sQUIC, which means:
 
 - **Lower latency** — 0-RTT connection establishment
 - **Connection migration** — roam between networks without dropping your session
-- **Multiplexed streams** — no head-of-line blocking between channels
-- **Silent server** — the server is invisible to unauthenticated scanners (sQUIC whitelisting)
+- **Privacy Concious Server** — the server is invisible to unauthenticated clients (sQUIC whitelisting)
 - **Parallel file transfers** — sqscp copies multiple files simultaneously over independent streams
+- **Multiplexed streams** — no head-of-line blocking between channels
 - **Session persistence** — shell sessions survive server restarts via PTY fd handoff
 
 Same port number (22), different protocol (UDP instead of TCP). They coexist.
