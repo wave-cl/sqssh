@@ -13,9 +13,19 @@ Tests are split into **automated** (can run non-interactively with an unencrypte
 #   both       — run automated first, then prompt for manual tests
 ```
 
+## Running
+
+```bash
+./tests/run.sh                          # uses default server
+./tests/run.sh root@your-server         # custom server
+SERVER_A=root@host ./tests/run.sh       # via env var
+```
+
+Output streams in real-time with colored PASS/FAIL per test and section summaries. Stops on first failure.
+
 ## Reporting
 
-Report results after each test section (A0, A1, A2, etc.) before proceeding to the next. If any test fails, **stop immediately** and report the failure — do not continue to subsequent sections until the failure is resolved.
+When running manually (without the script), report results after each test section (A0, A1, A2, etc.) before proceeding to the next. If any test fails, **stop immediately** and report the failure — do not continue to subsequent sections until the failure is resolved.
 
 ## Prerequisites
 
