@@ -1419,7 +1419,7 @@ dependencies = [
 
 [[package]]
 name = "sqscp"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "clap",
  "libc",
@@ -1433,7 +1433,7 @@ dependencies = [
 
 [[package]]
 name = "sqsftp"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "clap",
  "quinn",
@@ -1446,7 +1446,7 @@ dependencies = [
 
 [[package]]
 name = "sqssh"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "bytes",
  "clap",
@@ -1464,7 +1464,7 @@ dependencies = [
 
 [[package]]
 name = "sqssh-add"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "clap",
  "ed25519-dalek",
@@ -1473,7 +1473,7 @@ dependencies = [
 
 [[package]]
 name = "sqssh-agent"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "clap",
  "ed25519-dalek",
@@ -1487,7 +1487,7 @@ dependencies = [
 
 [[package]]
 name = "sqssh-copy-id"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "clap",
  "sqssh-core",
@@ -1499,7 +1499,7 @@ dependencies = [
 
 [[package]]
 name = "sqssh-core"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "argon2",
  "bs58",
@@ -1522,7 +1522,7 @@ dependencies = [
 
 [[package]]
 name = "sqssh-keygen"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "bs58",
  "clap",
@@ -1535,7 +1535,7 @@ dependencies = [
 
 [[package]]
 name = "sqssh-keyscan"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "clap",
  "sqssh-core",
@@ -1543,7 +1543,7 @@ dependencies = [
 
 [[package]]
 name = "sqssh-persist"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "libc",
  "sqssh-core",
@@ -1553,7 +1553,7 @@ dependencies = [
 
 [[package]]
 name = "sqsshctl"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "clap",
  "sqssh-core",
@@ -1561,7 +1561,7 @@ dependencies = [
 
 [[package]]
 name = "sqsshd"
-version = "0.2.0"
+version = "0.2.2"
 dependencies = [
  "bytes",
  "clap",
