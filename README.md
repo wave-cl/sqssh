@@ -1,4 +1,4 @@
-# sqssh
+# sqssh (squash)
 
 A modern replacement for the OpenSSH suite, built on [sQUIC](https://github.com/wave-cl/squic-rust).
 
