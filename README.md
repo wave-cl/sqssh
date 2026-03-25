@@ -8,10 +8,11 @@ SSH runs over TCP. sqssh runs over sQUIC, which means:
 
 - **Lower latency** — Secure 1-RTT connection establishment, SACK piggybacking
 - **Connection migration** — roam between networks without dropping your session
-- **Privacy Concious Server** — the server is invisible to unauthenticated clients (sQUIC whitelisting)
 - **Parallel file transfers** — sqscp copies multiple files simultaneously over independent streams
-- **Multiplexed streams** — no head-of-line blocking between channels
+- **Privacy Concious Server** — SSH responds to every connection attempt (banner, key exchange). sqssh drops unknown clients at the packet level
+- **No TOFU** — SSH trusts unknown hosts on first connect. sqssh requires the server key upfront. No opportunity for MITM on first connection
 - **Session persistence** — shell sessions survive server restarts via PTY fd handoff
+- **Base58 keys** — shorter, no confusing /+= characters, easy to share verbally or in chat.
 
 Same port number (22), different protocol (UDP instead of TCP). They coexist.
 
