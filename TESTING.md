@@ -44,9 +44,10 @@ done
 [ $MISSING -eq 0 ] || { echo "SETUP FAILED: missing binaries"; exit 1; }
 ```
 
-### A0.2 Verify SSH access to server
+### A0.2 Verify SSH and sqsshd are running on server
 ```
-ssh -o ConnectTimeout=5 $SERVER_A "echo ok" || { echo "SETUP FAILED: cannot SSH to $SERVER_A"; exit 1; }
+ssh -o ConnectTimeout=5 $SERVER_A "echo ssh-ok" || { echo "SETUP FAILED: cannot SSH to $SERVER_A (is sshd running?)"; exit 1; }
+ssh $SERVER_A "systemctl is-active sqsshd" | grep -q active || { echo "SETUP FAILED: sqsshd not running on $SERVER_A"; exit 1; }
 ```
 
 ### A0.3 Generate unencrypted test key
@@ -283,7 +284,10 @@ sleep 2
 ssh $SERVER_A "systemctl stop sqsshd"
 sleep 8
 kill -0 $PID 2>/dev/null && echo FAIL || echo PASS
+# IMPORTANT: restart sqsshd immediately — remaining tests need it
 ssh $SERVER_A "systemctl start sqsshd"
+sleep 2
+ssh $SERVER_A "systemctl is-active sqsshd" | grep -q active || { echo "CRITICAL: sqsshd failed to restart"; exit 1; }
 ```
 
 ### A6.3 Unknown key silently dropped
@@ -639,10 +643,12 @@ sqssh-keygen -l /tmp/test_key
 
 ### A12.20 sqssh-keygen -p change passphrase (short flag)
 ```
-echo "" | sqssh-keygen -f /tmp/test_key_pp -C "pp-test"
-printf "\nnew\nnew\n" | sqssh-keygen -p /tmp/test_key_pp
+# Generate unencrypted key, then add passphrase
+sqssh-keygen -f /tmp/test_key_pp -C "pp-test" -N ""
+printf "new\nnew\n" | sqssh-keygen -p /tmp/test_key_pp
 head -1 /tmp/test_key_pp
 # Expect: SQSSH-ED25519-ENCRYPTED-KEY
+# Now remove passphrase (enter old passphrase, then empty new passphrase)
 printf "new\n\n\n" | sqssh-keygen -p /tmp/test_key_pp
 head -1 /tmp/test_key_pp
 # Expect: SQSSH-ED25519-PRIVATE-KEY (passphrase removed)
