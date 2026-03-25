@@ -354,86 +354,45 @@ SQSSH_AGENT_SOCK=/tmp/nonexistent.sock sqssh-add -l
 
 ---
 
-## A8. File and Socket Permissions
+## A8. SFTP (piped stdin)
 
-> **Note:** A8.3 and A8.4 are destructive — they temporarily modify authorized_keys.
-> Run these last, before cleanup.
-
-### A8.1 Client-side permissions
-```
-stat -f "%Lp" ~/.sqssh/id_ed25519       # Expect: 600
-stat -f "%Lp" ~/.sqssh/id_ed25519.pub   # Expect: 644
-stat -f "%Lp" ~/.sqssh                  # Expect: 700
-stat -f "%Lp" ~/.sqssh/known_hosts      # Expect: 644
-```
-
-### A8.2 Server-side permissions
-```
-ssh $SERVER_A "stat -c %a /etc/sqssh/host_key"            # Expect: 600
-ssh $SERVER_A "stat -c %a ~/.sqssh"                        # Expect: 700
-ssh $SERVER_A "stat -c %a ~/.sqssh/authorized_keys"        # Expect: 600
-ssh $SERVER_A "stat -c %a /run/sqssh/control.sock 2>/dev/null || \
-               stat -c %a /var/run/sqssh/control.sock"     # Expect: 666
-```
-
-### A8.3 Authorized keys security: symlink rejected
-```
-ssh $SERVER_A "cp ~/.sqssh/authorized_keys ~/.sqssh/ak_backup"
-ssh $SERVER_A "rm ~/.sqssh/authorized_keys && ln -s /tmp/evil ~/.sqssh/authorized_keys"
-ssh $SERVER_A "sqsshctl reload-keys"
-# Expect: error about symlink
-ssh $SERVER_A "rm ~/.sqssh/authorized_keys && mv ~/.sqssh/ak_backup ~/.sqssh/authorized_keys"
-```
-
-### A8.4 Authorized keys security: world-writable rejected
-```
-ssh $SERVER_A "chmod 666 ~/.sqssh/authorized_keys"
-ssh $SERVER_A "sqsshctl reload-keys"
-# Expect: error about permissions
-ssh $SERVER_A "chmod 600 ~/.sqssh/authorized_keys"
-```
-
----
-
-## A9. SFTP (piped stdin)
-
-### A9.1 Navigate
+### A8.1 Navigate
 ```
 echo -e "pwd\ncd /tmp\npwd\nquit" | sqsftp -i /tmp/test_key $SERVER_A
 # Expect: first pwd shows home dir, second shows /tmp
 ```
 
-### A9.2 Upload and download
+### A8.2 Upload and download
 ```
 echo -e "lcd /tmp\nput test_upload\nget test_upload /tmp/sftp_dl\nquit" | sqsftp -i /tmp/test_key $SERVER_A
 md5sum /tmp/test_upload /tmp/sftp_dl
 # Checksums should match
 ```
 
-### A9.3 Directory operations
+### A8.3 Directory operations
 ```
 echo -e "mkdir /tmp/sftp_auto_test\nls /tmp/sftp_auto_test\nrm /tmp/sftp_auto_test\nquit" | sqsftp -i /tmp/test_key $SERVER_A
 ```
 
-### A9.4 File info and rename
+### A8.4 File info and rename
 ```
 echo -e "stat /etc/motd\nquit" | sqsftp -i /tmp/test_key $SERVER_A
 # Expect: shows path, type, size, mode
 ```
 
-### A9.5 Help and unknown command
+### A8.5 Help and unknown command
 ```
 echo -e "help\nfoobar\nquit" | sqsftp -i /tmp/test_key $SERVER_A
 # Expect: help output, then "unknown command: foobar"
 ```
 
-### A9.6 Local commands
+### A8.6 Local commands
 ```
 echo -e "lpwd\nlcd /tmp\nlpwd\nquit" | sqsftp -i /tmp/test_key $SERVER_A
 # Expect: second lpwd shows /tmp
 ```
 
-### A9.7 Tilde expansion
+### A8.7 Tilde expansion
 ```
 echo -e "cd ~\npwd\nquit" | sqsftp -i /tmp/test_key $SERVER_A
 # Expect: pwd shows home directory
@@ -441,9 +400,9 @@ echo -e "cd ~\npwd\nquit" | sqsftp -i /tmp/test_key $SERVER_A
 
 ---
 
-## A10. Key Agent (unencrypted key operations)
+## A9. Key Agent (unencrypted key operations)
 
-### A10.1 Add and list unencrypted key
+### A9.1 Add and list unencrypted key
 ```
 # Start agent, add unencrypted test key, verify
 sqssh-agent &
@@ -454,13 +413,13 @@ sqssh-add /tmp/test_key
 sqssh-add -l             # Should show the key
 ```
 
-### A10.2 Remove specific key
+### A9.2 Remove specific key
 ```
 sqssh-add -d /tmp/test_key
 sqssh-add -l             # Should be empty
 ```
 
-### A10.3 Remove all keys
+### A9.3 Remove all keys
 ```
 sqssh-add /tmp/test_key
 sqssh-add -D
@@ -468,7 +427,7 @@ sqssh-add -l             # Should be empty
 kill $AGENT_PID
 ```
 
-### A10.4 Stale socket detection
+### A9.4 Stale socket detection
 ```
 touch ~/.sqssh/agent.sock
 sqssh-agent 2>&1
@@ -478,9 +437,9 @@ rm -f ~/.sqssh/agent.sock
 
 ---
 
-## A11. Configuration (-F flag)
+## A10. Configuration (-F flag)
 
-### A11.1 Host alias via -F
+### A10.1 Host alias via -F
 ```
 cat > /tmp/sqssh_test_config << EOF
 Host testhost
@@ -492,7 +451,7 @@ sqssh -F /tmp/sqssh_test_config testhost "echo config-works"
 # Expect: "config-works"
 ```
 
-### A11.2 Wildcard matching via -F
+### A10.2 Wildcard matching via -F
 ```
 cat > /tmp/sqssh_test_config << EOF
 Host *.testdomain
@@ -504,23 +463,29 @@ sqssh -F /tmp/sqssh_test_config server1.testdomain "echo wildcard-works"
 # Expect: "wildcard-works"
 ```
 
-### A11.3 sqscp with -F
+### A10.3 sqscp with -F
 ```
+cat > /tmp/sqssh_test_config << EOF
+Host testhost
+    Hostname 167.235.197.87
+    User root
+    IdentityFile /tmp/test_key
+EOF
 sqscp -F /tmp/sqssh_test_config -i /tmp/test_key /tmp/test_upload root@testhost:/tmp/
 # Expect: upload succeeds using config hostname resolution
 ```
 
-### A11.4 sqsftp with -F
+### A10.4 sqsftp with -F
 ```
-echo -e "pwd\nquit" | sqsftp -F /tmp/sqssh_test_config testhost
-# Expect: shows home directory
+echo -e "pwd\nquit" | sqsftp -F /tmp/sqssh_test_config -i /tmp/test_key testhost
+# Expect: shows home directory (config provides Hostname + User)
 ```
 
 ---
 
-## A12. Ctrl+C Handling
+## A11. Ctrl+C Handling
 
-### A12.1 Ctrl+C doesn't kill session
+### A11.1 Ctrl+C doesn't kill session
 ```
 sqssh -i /tmp/test_key $SERVER_A "sleep 100" &
 PID=$!
@@ -530,6 +495,47 @@ sleep 1
 # sqssh should still be running (sleep interrupted, not sqssh)
 kill -0 $PID 2>/dev/null && echo PASS || echo FAIL
 kill $PID 2>/dev/null; wait $PID 2>/dev/null
+```
+
+---
+
+## A12. File and Socket Permissions
+
+> **Note:** A12.3 and A12.4 are destructive — they temporarily modify authorized_keys.
+> This section runs last, just before cleanup.
+
+### A12.1 Client-side permissions
+```
+stat -f "%Lp" ~/.sqssh/id_ed25519       # Expect: 600
+stat -f "%Lp" ~/.sqssh/id_ed25519.pub   # Expect: 644
+stat -f "%Lp" ~/.sqssh                  # Expect: 700
+stat -f "%Lp" ~/.sqssh/known_hosts      # Expect: 644
+```
+
+### A12.2 Server-side permissions
+```
+ssh $SERVER_A "stat -c %a /etc/sqssh/host_key"            # Expect: 600
+ssh $SERVER_A "stat -c %a ~/.sqssh"                        # Expect: 700
+ssh $SERVER_A "stat -c %a ~/.sqssh/authorized_keys"        # Expect: 600
+ssh $SERVER_A "stat -c %a /run/sqssh/control.sock 2>/dev/null || \
+               stat -c %a /var/run/sqssh/control.sock"     # Expect: 666
+```
+
+### A12.3 Authorized keys security: symlink rejected
+```
+ssh $SERVER_A "cp ~/.sqssh/authorized_keys ~/.sqssh/ak_backup"
+ssh $SERVER_A "rm ~/.sqssh/authorized_keys && ln -s /tmp/evil ~/.sqssh/authorized_keys"
+ssh $SERVER_A "sqsshctl reload-keys"
+# Expect: error about symlink
+ssh $SERVER_A "rm ~/.sqssh/authorized_keys && mv ~/.sqssh/ak_backup ~/.sqssh/authorized_keys"
+```
+
+### A12.4 Authorized keys security: world-writable rejected
+```
+ssh $SERVER_A "chmod 666 ~/.sqssh/authorized_keys"
+ssh $SERVER_A "sqsshctl reload-keys"
+# Expect: error about permissions
+ssh $SERVER_A "chmod 600 ~/.sqssh/authorized_keys"
 ```
 
 ---
