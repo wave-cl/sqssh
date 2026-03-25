@@ -923,6 +923,16 @@ section_end
 section_start "A15. Long-form Flags"
 if [[ "$SKIP_SECTION" != "true" ]]; then
 
+# Re-deploy test key (A13 destructive tests may have removed it)
+TESTPUB=$(awk '{print $2}' /tmp/test_key.pub 2>/dev/null)
+if [[ -n "$TESTPUB" ]]; then
+    ssh "$SERVER_A" "grep -qF '$TESTPUB' ~/.sqssh/authorized_keys 2>/dev/null || \
+        (echo 'sqssh-ed25519 $TESTPUB automated-test' >> ~/.sqssh/authorized_keys && \
+        chmod 600 ~/.sqssh/authorized_keys)" 2>/dev/null
+    ssh "$SERVER_A" "systemctl restart sqsshd" 2>/dev/null
+    sleep 1
+fi
+
 # A15.1 sqssh --port --identity --login-name
 OUT=$(sqssh --identity /tmp/test_key --login-name root --port 22 "$HOST_IP" "whoami" 2>&1)
 echo "$OUT" | grep -q "root" \
