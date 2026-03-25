@@ -21,22 +21,6 @@ SERVER_A=root@167.235.197.87
 
 # Server B: sqsshd running (used for server-to-server and benchmark tests)
 SERVER_B=root@46.224.104.133
-
-# Generate an unencrypted test key for automated tests
-sqssh-keygen -f /tmp/test_key -C "automated-test"
-# (press Enter for no passphrase)
-
-# Deploy the test key to Server A
-ssh $SERVER_A "mkdir -p ~/.sqssh && chmod 700 ~/.sqssh"
-TESTPUB=$(awk '{print $2}' /tmp/test_key.pub)
-ssh $SERVER_A "grep -qF '$TESTPUB' ~/.sqssh/authorized_keys 2>/dev/null || \
-  (echo 'sqssh-ed25519 $TESTPUB automated-test' >> ~/.sqssh/authorized_keys && \
-  chmod 600 ~/.sqssh/authorized_keys && sqsshctl reload-keys)"
-
-# Verify all binaries are installed
-for bin in sqssh sqscp sqsftp sqssh-keygen sqssh-agent sqssh-add sqssh-copy-id sqssh-keyscan sqsshctl; do
-  $bin --help > /dev/null 2>&1 && echo "$bin: OK" || echo "$bin: MISSING"
-done
 ```
 
 ---
@@ -44,6 +28,57 @@ done
 # Automated Tests
 
 All tests below can run non-interactively using `-i /tmp/test_key`.
+
+## A0. Setup (mandatory — gates all other tests)
+
+This section generates the test key, deploys it, restarts sqsshd to ensure the
+whitelist is fresh, and verifies end-to-end connectivity. If any step fails, all
+subsequent tests should be skipped.
+
+### A0.1 Verify binaries installed
+```
+MISSING=0
+for bin in sqssh sqscp sqsftp sqssh-keygen sqssh-agent sqssh-add sqssh-copy-id sqssh-keyscan sqsshctl; do
+  $bin --help > /dev/null 2>&1 && echo "$bin: OK" || { echo "$bin: MISSING"; MISSING=1; }
+done
+[ $MISSING -eq 0 ] || { echo "SETUP FAILED: missing binaries"; exit 1; }
+```
+
+### A0.2 Verify SSH access to server
+```
+ssh -o ConnectTimeout=5 $SERVER_A "echo ok" || { echo "SETUP FAILED: cannot SSH to $SERVER_A"; exit 1; }
+```
+
+### A0.3 Generate unencrypted test key
+```
+rm -f /tmp/test_key /tmp/test_key.pub
+echo "" | sqssh-keygen -f /tmp/test_key -C "automated-test"
+[ -f /tmp/test_key ] && [ -f /tmp/test_key.pub ] || { echo "SETUP FAILED: key generation"; exit 1; }
+```
+
+### A0.4 Deploy test key to server
+```
+TESTPUB=$(awk '{print $2}' /tmp/test_key.pub)
+ssh $SERVER_A "mkdir -p ~/.sqssh && chmod 700 ~/.sqssh"
+ssh $SERVER_A "grep -qF '$TESTPUB' ~/.sqssh/authorized_keys 2>/dev/null || \
+  (echo 'sqssh-ed25519 $TESTPUB automated-test' >> ~/.sqssh/authorized_keys && \
+  chmod 600 ~/.sqssh/authorized_keys)"
+```
+
+### A0.5 Restart sqsshd to reload whitelist
+```
+ssh $SERVER_A "systemctl restart sqsshd"
+sleep 2
+ssh $SERVER_A "systemctl is-active sqsshd" | grep -q active || { echo "SETUP FAILED: sqsshd not active"; exit 1; }
+```
+
+### A0.6 Verify sqssh connectivity with test key
+```
+sqssh -i /tmp/test_key $SERVER_A "echo setup-ok" | grep -q "setup-ok" || { echo "SETUP FAILED: sqssh connection"; exit 1; }
+echo "A0 SETUP COMPLETE"
+```
+
+---
 
 ## A1. Key Generation (sqssh-keygen)
 
