@@ -3,7 +3,7 @@ use sqssh_core::keys;
 use sqssh_core::known_hosts::KnownHosts;
 
 #[derive(Parser)]
-#[command(name = "sqssh-keyscan", about = "Manage sqssh known hosts")]
+#[command(name = "sqssh-keyscan", about = "Manage sqssh known hosts", version)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -29,6 +29,19 @@ enum Command {
     Fingerprint {
         /// Base58-encoded public key
         pubkey: String,
+    },
+    /// Scan a remote host for its public key
+    Scan {
+        /// Hostname to scan
+        host: Option<String>,
+
+        /// Port number
+        #[arg(short = 'p', long = "port")]
+        port: Option<u16>,
+
+        /// Connection timeout in seconds
+        #[arg(short = 'T', long = "timeout")]
+        timeout: Option<u64>,
     },
 }
 
@@ -103,6 +116,13 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 .join(":");
             println!("SHA256:{fingerprint}");
             println!("  {pubkey}");
+        }
+
+        Command::Scan { .. } => {
+            println!(
+                "sqssh-keyscan: remote scanning is not available — sQUIC servers are silent to unknown clients. \
+                 Use 'sqsshd --show-pubkey' on the server and 'sqssh-keyscan add' on the client."
+            );
         }
     }
 

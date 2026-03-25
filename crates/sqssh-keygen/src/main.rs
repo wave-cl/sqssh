@@ -4,7 +4,7 @@ use clap::Parser;
 use sqssh_core::keys;
 
 #[derive(Parser)]
-#[command(name = "sqssh-keygen", about = "Generate sqssh Ed25519 keypairs")]
+#[command(name = "sqssh-keygen", about = "Generate sqssh Ed25519 keypairs", version)]
 struct Cli {
     /// Output file path for the private key (public key gets .pub suffix)
     #[arg(short = 'f', long = "file")]
@@ -15,20 +15,55 @@ struct Cli {
     comment: String,
 
     /// Show the public key fingerprint of a key file
-    #[arg(long = "fingerprint")]
+    #[arg(short = 'l', long = "fingerprint")]
     fingerprint: Option<PathBuf>,
 
     /// Import an OpenSSH Ed25519 private key
-    #[arg(long = "import-openssh")]
+    #[arg(short = 'I', long = "import-openssh")]
     import_openssh: Option<PathBuf>,
 
     /// Change the passphrase of an existing key
-    #[arg(long = "change-passphrase")]
+    #[arg(short = 'p', long = "change-passphrase")]
     change_passphrase: Option<PathBuf>,
+
+    /// New passphrase (non-interactive; empty string means no passphrase)
+    #[arg(short = 'N', long = "new-passphrase")]
+    new_passphrase: Option<String>,
+
+    /// Read private key and print corresponding public key
+    #[arg(short = 'y', long = "print-public")]
+    print_public: bool,
+
+    /// Quiet mode
+    #[arg(short = 'q', long = "quiet")]
+    quiet: bool,
+
+    /// Key type (only "ed25519" is accepted)
+    #[arg(short = 't', long = "type")]
+    key_type: Option<String>,
 }
 
 fn main() {
     let cli = Cli::parse();
+
+    // Validate key type if provided
+    if let Some(ref kt) = cli.key_type {
+        if kt != "ed25519" {
+            eprintln!("error: unsupported key type '{kt}'. Only 'ed25519' is supported.");
+            std::process::exit(1);
+        }
+    }
+
+    if cli.print_public {
+        match print_public_key(&cli) {
+            Ok(()) => {}
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
 
     if let Some(ref path) = cli.fingerprint {
         match show_fingerprint(path) {
@@ -72,6 +107,20 @@ fn main() {
     }
 }
 
+fn print_public_key(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let sqssh_dir = keys::ensure_sqssh_dir()?;
+    let priv_path = cli
+        .file
+        .clone()
+        .unwrap_or_else(|| sqssh_dir.join("id_ed25519"));
+
+    let signing_key = keys::load_private_key(&priv_path)?;
+    let verifying_key = signing_key.verifying_key();
+    let encoded = keys::encode_pubkey(&verifying_key);
+    println!("sqssh-ed25519 {encoded}");
+    Ok(())
+}
+
 fn generate_key(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let sqssh_dir = keys::ensure_sqssh_dir()?;
 
@@ -106,14 +155,19 @@ fn generate_key(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         cli.comment.clone()
     };
 
-    // Prompt for passphrase
-    let passphrase = keys::prompt_passphrase("Enter passphrase (empty for no passphrase): ")?;
-    if !passphrase.is_empty() {
-        let confirm = keys::prompt_passphrase("Enter same passphrase again: ")?;
-        if *passphrase != *confirm {
-            return Err("passphrases do not match".into());
+    // Use -N passphrase if provided, otherwise prompt
+    let passphrase = if let Some(ref np) = cli.new_passphrase {
+        zeroize::Zeroizing::new(np.clone())
+    } else {
+        let pp = keys::prompt_passphrase("Enter passphrase (empty for no passphrase): ")?;
+        if !pp.is_empty() {
+            let confirm = keys::prompt_passphrase("Enter same passphrase again: ")?;
+            if *pp != *confirm {
+                return Err("passphrases do not match".into());
+            }
         }
-    }
+        pp
+    };
 
     let pp = if passphrase.is_empty() {
         None
@@ -123,11 +177,13 @@ fn generate_key(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     keys::save_private_key_with_passphrase(&priv_path, &signing_key, pp)?;
     keys::save_public_key(&pub_path, &verifying_key, &comment)?;
 
-    let encoded = keys::encode_pubkey(&verifying_key);
-    eprintln!("Generated Ed25519 keypair:");
-    eprintln!("  Private key: {}", priv_path.display());
-    eprintln!("  Public key:  {}", pub_path.display());
-    eprintln!("  Public key:  {encoded}");
+    if !cli.quiet {
+        let encoded = keys::encode_pubkey(&verifying_key);
+        eprintln!("Generated Ed25519 keypair:");
+        eprintln!("  Private key: {}", priv_path.display());
+        eprintln!("  Public key:  {}", pub_path.display());
+        eprintln!("  Public key:  {encoded}");
+    }
 
     Ok(())
 }

@@ -6,22 +6,34 @@ use sqssh_core::keys;
 use sqssh_core::protocol;
 
 #[derive(Parser)]
-#[command(name = "sqssh-copy-id", about = "Deploy public key to remote host")]
+#[command(name = "sqssh-copy-id", about = "Deploy public key to remote host", version)]
 struct Cli {
     /// [user@]hostname
     destination: String,
 
     /// Public key file to deploy
-    #[arg(short = 'i', long)]
+    #[arg(short = 'i', long = "identity")]
     identity: Option<PathBuf>,
 
     /// Port (UDP)
-    #[arg(short = 'p', long)]
+    #[arg(short = 'p', long = "port")]
     port: Option<u16>,
 
     /// Config file (default: ~/.sqssh/config)
     #[arg(short = 'F', long = "config")]
     config_file: Option<PathBuf>,
+
+    /// Dry run (show what would be done without doing it)
+    #[arg(short = 'n', long = "dry-run")]
+    dry_run: bool,
+
+    /// Force mode (skip duplicate key check)
+    #[arg(short = 'f', long = "force")]
+    force: bool,
+
+    /// SSH config option (accepted for compatibility, currently ignored)
+    #[arg(short = 'o', long = "option", num_args = 1)]
+    option: Vec<String>,
 }
 
 #[tokio::main]
@@ -55,6 +67,12 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let pubkey_b58 = keys::encode_pubkey(&verifying_key);
     let key_line = format!("sqssh-ed25519 {pubkey_b58} {comment}");
 
+    // Dry-run: show what would be done and exit
+    if cli.dry_run {
+        eprintln!("Would deploy key: {pubkey_b58} to {host}");
+        return Ok(());
+    }
+
     eprintln!("deploying key: {pubkey_b58}");
 
     // Connect to remote
@@ -68,16 +86,28 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     .await?;
 
     // Build remote command
-    let cmd = format!(
-        "mkdir -p ~/.sqssh && \
-         chmod 700 ~/.sqssh && \
-         grep -qF '{pubkey_b58}' ~/.sqssh/authorized_keys 2>/dev/null && \
-         echo 'KEY_EXISTS' || \
-         (echo '{key_line}' >> ~/.sqssh/authorized_keys && \
-         chmod 600 ~/.sqssh/authorized_keys && \
-         sqsshctl reload-keys 2>/dev/null; \
-         echo 'KEY_ADDED')"
-    );
+    let cmd = if cli.force {
+        // Force mode: skip duplicate check, always append
+        format!(
+            "mkdir -p ~/.sqssh && \
+             chmod 700 ~/.sqssh && \
+             echo '{key_line}' >> ~/.sqssh/authorized_keys && \
+             chmod 600 ~/.sqssh/authorized_keys && \
+             sqsshctl reload-keys 2>/dev/null; \
+             echo 'KEY_ADDED'"
+        )
+    } else {
+        format!(
+            "mkdir -p ~/.sqssh && \
+             chmod 700 ~/.sqssh && \
+             grep -qF '{pubkey_b58}' ~/.sqssh/authorized_keys 2>/dev/null && \
+             echo 'KEY_EXISTS' || \
+             (echo '{key_line}' >> ~/.sqssh/authorized_keys && \
+             chmod 600 ~/.sqssh/authorized_keys && \
+             sqsshctl reload-keys 2>/dev/null; \
+             echo 'KEY_ADDED')"
+        )
+    };
 
     // Open raw exec bidi stream: [RAW_EXEC][2 bytes cmd_len][command]
     let (mut send, mut recv) = conn.conn.open_bi().await?;

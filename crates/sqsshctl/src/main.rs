@@ -6,7 +6,7 @@ use clap::Parser;
 use sqssh_core::protocol::{CtlRequest, CtlResponse};
 
 #[derive(Parser)]
-#[command(name = "sqsshctl", about = "sqssh server control utility")]
+#[command(name = "sqsshctl", about = "sqssh server control utility", version)]
 struct Cli {
     #[command(subcommand)]
     command: Command,

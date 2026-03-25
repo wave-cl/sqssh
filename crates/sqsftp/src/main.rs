@@ -7,22 +7,38 @@ use sqssh_core::client;
 use sqssh_core::protocol::{ManifestEntry, RawFileHeader, SftpCmd, SftpResp, RAW_SFTP, RAW_CHUNK_SIZE};
 
 #[derive(Parser)]
-#[command(name = "sqsftp", about = "sqssh interactive file transfer")]
+#[command(name = "sqsftp", about = "sqssh interactive file transfer", version)]
 struct Cli {
     /// [user@]hostname
     destination: String,
 
     /// Port (UDP)
-    #[arg(short = 'p', long)]
+    #[arg(short = 'p', short_alias = 'P', long = "port")]
     port: Option<u16>,
 
     /// Identity file (private key)
-    #[arg(short = 'i', long)]
+    #[arg(short = 'i', long = "identity")]
     identity: Option<PathBuf>,
 
     /// Config file (default: ~/.sqssh/config)
     #[arg(short = 'F', long = "config")]
     config_file: Option<PathBuf>,
+
+    /// Batch file (read commands from file instead of stdin)
+    #[arg(short = 'b', long = "batch")]
+    batch: Option<PathBuf>,
+
+    /// Quiet mode
+    #[arg(short = 'q', long = "quiet")]
+    quiet: bool,
+
+    /// Verbose mode
+    #[arg(short = 'v', long = "verbose")]
+    verbose: bool,
+
+    /// SSH config option (accepted for compatibility, currently ignored)
+    #[arg(short = 'o', long = "option", num_args = 1)]
+    option: Vec<String>,
 }
 
 #[tokio::main]
@@ -67,15 +83,34 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         _ => "~".to_string(),
     };
 
+    // Set up input source: batch file or stdin
+    let batch_input: Option<io::BufReader<std::fs::File>> = if let Some(ref batch_path) = cli.batch {
+        let file = std::fs::File::open(batch_path)
+            .map_err(|e| format!("cannot open batch file {}: {e}", batch_path.display()))?;
+        Some(io::BufReader::new(file))
+    } else {
+        None
+    };
+
     let stdin = io::stdin();
-    let mut reader = stdin.lock();
+    let mut stdin_reader = stdin.lock();
+    let mut batch_reader = batch_input;
+    let is_batch = batch_reader.is_some();
+    let _quiet = cli.quiet;
 
     loop {
-        print!("sftp> ");
-        io::stdout().flush()?;
+        if !is_batch {
+            print!("sftp> ");
+            io::stdout().flush()?;
+        }
 
         let mut line = String::new();
-        if reader.read_line(&mut line)? == 0 {
+        let bytes_read = if let Some(ref mut br) = batch_reader {
+            br.read_line(&mut line)?
+        } else {
+            stdin_reader.read_line(&mut line)?
+        };
+        if bytes_read == 0 {
             break;
         }
 

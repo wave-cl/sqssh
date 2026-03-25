@@ -13,22 +13,22 @@ use sqssh_core::protocol::{
 use tokio::sync::Semaphore;
 
 #[derive(Parser)]
-#[command(name = "sqscp", about = "sqssh secure file copy")]
+#[command(name = "sqscp", about = "sqssh secure file copy", version)]
 struct Cli {
     /// Source(s) and destination
     #[arg(required = true, num_args = 2..)]
     args: Vec<String>,
 
     /// Port (UDP)
-    #[arg(short = 'P', long)]
+    #[arg(short = 'P', long = "port")]
     port: Option<u16>,
 
     /// Identity file (private key)
-    #[arg(short = 'i', long)]
+    #[arg(short = 'i', long = "identity")]
     identity: Option<PathBuf>,
 
     /// Recursive copy
-    #[arg(short = 'r', long)]
+    #[arg(short = 'r', long = "recursive")]
     recursive: bool,
 
     /// Preserve modification times
@@ -36,24 +36,32 @@ struct Cli {
     preserve: bool,
 
     /// Max concurrent transfers
-    #[arg(short = 'j', long, default_value = "8")]
+    #[arg(short = 'j', long = "jobs", default_value = "8")]
     jobs: usize,
 
     /// Bandwidth limit in KB/s (0 = unlimited)
-    #[arg(short = 'l', long, default_value = "0")]
+    #[arg(short = 'l', long = "limit", default_value = "0")]
     limit: u64,
 
     /// Quiet mode (no progress output)
-    #[arg(short = 'q', long)]
+    #[arg(short = 'q', long = "quiet")]
     quiet: bool,
 
     /// Verbose mode
-    #[arg(short = 'v', long)]
+    #[arg(short = 'v', long = "verbose")]
     verbose: bool,
 
     /// Config file (default: ~/.sqssh/config)
     #[arg(short = 'F', long = "config")]
     config_file: Option<PathBuf>,
+
+    /// SSH config option (accepted for compatibility, currently ignored)
+    #[arg(short = 'o', long = "option", num_args = 1)]
+    option: Vec<String>,
+
+    /// ProxyJump (not yet implemented)
+    #[arg(short = 'J', long = "proxy-jump")]
+    proxy_jump: Option<String>,
 }
 
 /// Shared progress state.
@@ -120,6 +128,11 @@ fn format_bytes(bytes: u64) -> String {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+
+    if cli.proxy_jump.is_some() {
+        eprintln!("sqscp: ProxyJump (-J) is not yet implemented");
+        std::process::exit(1);
+    }
 
     if cli.verbose {
         tracing_subscriber::fmt::init();

@@ -15,3 +15,4 @@ ed25519-dalek = { workspace = true }
 zeroize = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+libc = { workspace = true }

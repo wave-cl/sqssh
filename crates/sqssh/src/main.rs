@@ -10,7 +10,7 @@ use sqssh_core::protocol::{self, RawShellHeader, ShellControlHeader, ShellContro
 use tokio::io::AsyncWriteExt;
 
 #[derive(Parser)]
-#[command(name = "sqssh", about = "sqssh remote shell client")]
+#[command(name = "sqssh", about = "sqssh remote shell client", version)]
 struct Cli {
     /// [user@]hostname
     destination: String,
@@ -19,20 +19,72 @@ struct Cli {
     command: Vec<String>,
 
     /// Port (UDP)
-    #[arg(short = 'p', long)]
+    #[arg(short = 'p', long = "port")]
     port: Option<u16>,
 
     /// Identity file (private key)
-    #[arg(short = 'i', long)]
+    #[arg(short = 'i', long = "identity")]
     identity: Option<PathBuf>,
 
+    /// Specifies the user to log in as
+    #[arg(short = 'l', long = "login-name")]
+    login_name: Option<String>,
+
+    /// Do not execute a remote command (useful for forwarding)
+    #[arg(short = 'N', long = "no-command")]
+    no_command: bool,
+
+    /// Redirect stdin from /dev/null
+    #[arg(short = 'n', long = "no-stdin")]
+    no_stdin: bool,
+
+    /// Disable pseudo-terminal allocation
+    #[arg(short = 'T', long = "no-pty")]
+    no_pty: bool,
+
+    /// Force pseudo-terminal allocation
+    #[arg(short = 't', long = "force-pty")]
+    force_pty: bool,
+
+    /// Quiet mode (suppress warnings and diagnostics)
+    #[arg(short = 'q', long = "quiet")]
+    quiet: bool,
+
     /// Verbose mode (enables debug logging)
-    #[arg(short = 'v', long)]
+    #[arg(short = 'v', long = "verbose")]
     verbose: bool,
 
     /// Config file (default: ~/.sqssh/config)
     #[arg(short = 'F', long = "config")]
     config_file: Option<PathBuf>,
+
+    /// Set escape character (default: ~)
+    #[arg(short = 'e', long = "escape")]
+    escape_char: Option<char>,
+
+    /// Log to file instead of stderr
+    #[arg(short = 'E', long = "log-file")]
+    log_file: Option<PathBuf>,
+
+    /// Pass config option (key=value)
+    #[arg(short = 'o', long = "option")]
+    options: Vec<String>,
+
+    /// Local port forwarding (not yet implemented)
+    #[arg(short = 'L', long = "local-forward")]
+    local_forward: Vec<String>,
+
+    /// Remote port forwarding (not yet implemented)
+    #[arg(short = 'R', long = "remote-forward")]
+    remote_forward: Vec<String>,
+
+    /// Dynamic port forwarding / SOCKS5 proxy (not yet implemented)
+    #[arg(short = 'D', long = "dynamic-forward")]
+    dynamic_forward: Vec<String>,
+
+    /// ProxyJump host (not yet implemented)
+    #[arg(short = 'J', long = "proxy-jump")]
+    proxy_jump: Option<String>,
 }
 
 #[tokio::main]
@@ -54,6 +106,24 @@ async fn main() {
 }
 
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+    // Stub checks for unimplemented features
+    if !cli.local_forward.is_empty() {
+        eprintln!("sqssh: local port forwarding (-L) is not yet implemented");
+        std::process::exit(1);
+    }
+    if !cli.remote_forward.is_empty() {
+        eprintln!("sqssh: remote port forwarding (-R) is not yet implemented");
+        std::process::exit(1);
+    }
+    if !cli.dynamic_forward.is_empty() {
+        eprintln!("sqssh: dynamic port forwarding (-D) is not yet implemented");
+        std::process::exit(1);
+    }
+    if cli.proxy_jump.is_some() {
+        eprintln!("sqssh: ProxyJump (-J) is not yet implemented");
+        std::process::exit(1);
+    }
+
     // Parse user@host
     let (user, host) = parse_destination(&cli.destination)?;
 
@@ -68,6 +138,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let actual_host = resolved.hostname.as_deref().unwrap_or(&host);
     let port = cli.port.unwrap_or(resolved.port);
     let user = user
+        .or(cli.login_name.clone())
         .or(resolved.user.clone())
         .unwrap_or_else(|| whoami::username());
 
@@ -137,6 +208,15 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    if cli.no_command {
+        // -N: do not execute a remote command, just hold the connection
+        if !cli.quiet {
+            eprintln!("sqssh: holding connection (no remote command)");
+        }
+        tokio::signal::ctrl_c().await?;
+        return Ok(());
+    }
+
     if !cli.command.is_empty() {
         let cmd = cli.command.join(" ");
         return run_remote_command(&conn, &cmd).await;
@@ -162,6 +242,7 @@ async fn reconnect_raw_shell(
     let actual_host = resolved.hostname.as_deref().unwrap_or(&host);
     let port = cli.port.unwrap_or(resolved.port);
     let user = user
+        .or(cli.login_name.clone())
         .or(resolved.user.clone())
         .unwrap_or_else(|| whoami::username());
 

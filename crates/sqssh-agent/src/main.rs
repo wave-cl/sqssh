@@ -13,15 +13,23 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
 
 #[derive(Parser)]
-#[command(name = "sqssh-agent", about = "sqssh key agent")]
+#[command(name = "sqssh-agent", about = "sqssh key agent", version)]
 struct Cli {
     /// Run in foreground (debug mode)
-    #[arg(short = 'd', long)]
+    #[arg(short = 'd', long = "debug")]
     debug: bool,
 
     /// Socket path
-    #[arg(short = 's', long)]
+    #[arg(short = 's', long = "socket")]
     socket: Option<PathBuf>,
+
+    /// Kill a running agent
+    #[arg(short = 'k', long = "kill")]
+    kill: bool,
+
+    /// Default lifetime for keys (accepted but currently ignored)
+    #[arg(short = 't', long = "default-lifetime")]
+    default_lifetime: Option<u64>,
 }
 
 struct AgentState {
@@ -36,9 +44,63 @@ async fn main() {
         tracing_subscriber::fmt::init();
     }
 
+    if cli.kill {
+        if let Err(e) = kill_agent(&cli) {
+            eprintln!("sqssh-agent: {e}");
+            std::process::exit(1);
+        }
+        return;
+    }
+
     if let Err(e) = run(cli).await {
         eprintln!("sqssh-agent: {e}");
         std::process::exit(1);
+    }
+}
+
+fn kill_agent(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
+    let sqssh_dir = keys::sqssh_dir()?;
+    let socket_path = cli
+        .socket
+        .clone()
+        .unwrap_or_else(|| sqssh_dir.join("agent.sock"));
+
+    if !socket_path.exists() {
+        return Err(format!(
+            "agent socket not found at {}",
+            socket_path.display()
+        )
+        .into());
+    }
+
+    // Try to find the agent process by checking who has the socket open
+    // Use lsof to find the PID
+    let output = std::process::Command::new("lsof")
+        .arg("-t")
+        .arg(&socket_path)
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let pid_str = String::from_utf8_lossy(&out.stdout);
+            for line in pid_str.lines() {
+                if let Ok(pid) = line.trim().parse::<i32>() {
+                    unsafe {
+                        libc::kill(pid, libc::SIGTERM);
+                    }
+                    eprintln!("killed agent (pid {pid})");
+                }
+            }
+            // Clean up the socket file
+            let _ = std::fs::remove_file(&socket_path);
+            Ok(())
+        }
+        _ => {
+            // If lsof fails, just remove the stale socket
+            let _ = std::fs::remove_file(&socket_path);
+            eprintln!("removed stale socket at {}", socket_path.display());
+            Ok(())
+        }
     }
 }
 

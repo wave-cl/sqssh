@@ -7,22 +7,42 @@ use sqssh_core::keys;
 use sqssh_core::protocol::{AgentRequest, AgentResponse};
 
 #[derive(Parser)]
-#[command(name = "sqssh-add", about = "Add keys to sqssh-agent")]
+#[command(name = "sqssh-add", about = "Add keys to sqssh-agent", version)]
 struct Cli {
     /// Key file(s) to add (default: ~/.sqssh/id_ed25519)
     keys: Vec<PathBuf>,
 
-    /// List keys in agent
-    #[arg(short = 'l', long)]
+    /// List fingerprints of keys in agent
+    #[arg(short = 'l', long = "list")]
     list: bool,
 
+    /// List full public keys in agent
+    #[arg(short = 'L', long = "list-public")]
+    list_public: bool,
+
     /// Remove a specific key
-    #[arg(short = 'd', long)]
+    #[arg(short = 'd', long = "delete")]
     delete: Option<PathBuf>,
 
     /// Remove all keys
     #[arg(short = 'D', long = "delete-all")]
     delete_all: bool,
+
+    /// Lifetime for the key when adding (in seconds; accepted but currently ignored)
+    #[arg(short = 't', long = "lifetime")]
+    lifetime: Option<u64>,
+
+    /// Quiet mode
+    #[arg(short = 'q', long = "quiet")]
+    quiet: bool,
+
+    /// Lock agent with passphrase (not yet implemented)
+    #[arg(short = 'x', long = "lock")]
+    lock: bool,
+
+    /// Unlock agent (not yet implemented)
+    #[arg(short = 'X', long = "unlock")]
+    unlock: bool,
 }
 
 fn main() {
@@ -57,8 +77,22 @@ fn send_request(
 }
 
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+    if cli.lock {
+        eprintln!("sqssh-add: agent locking is not yet implemented");
+        return Ok(());
+    }
+
+    if cli.unlock {
+        eprintln!("sqssh-add: agent unlocking is not yet implemented");
+        return Ok(());
+    }
+
     if cli.list {
         return list_keys();
+    }
+
+    if cli.list_public {
+        return list_public_keys();
     }
 
     if cli.delete_all {
@@ -78,13 +112,13 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     };
 
     for path in &key_paths {
-        add_key(path)?;
+        add_key(path, cli.quiet)?;
     }
 
     Ok(())
 }
 
-fn add_key(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+fn add_key(path: &PathBuf, quiet: bool) -> Result<(), Box<dyn std::error::Error>> {
     let signing_key = keys::load_private_key(path)?;
     let verifying_key = signing_key.verifying_key();
     let pubkey_b58 = keys::encode_pubkey(&verifying_key);
@@ -106,7 +140,9 @@ fn add_key(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 
     match response {
         AgentResponse::Ok => {
-            eprintln!("Identity added: {} ({pubkey_b58})", path.display());
+            if !quiet {
+                eprintln!("Identity added: {} ({pubkey_b58})", path.display());
+            }
         }
         AgentResponse::Error { message } => {
             return Err(format!("failed to add key: {message}").into());
@@ -142,6 +178,41 @@ fn list_keys() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 eprintln!("{} key(s) in agent", entries.len());
+            }
+        }
+        AgentResponse::Error { message } => {
+            return Err(message.into());
+        }
+        _ => {
+            return Err("unexpected response".into());
+        }
+    }
+
+    Ok(())
+}
+
+fn list_public_keys() -> Result<(), Box<dyn std::error::Error>> {
+    let response = send_request(&AgentRequest::ListKeys)?;
+
+    match response {
+        AgentResponse::Keys { entries } => {
+            if entries.is_empty() {
+                eprintln!("The agent has no identities.");
+            } else {
+                for entry in &entries {
+                    let pubkey_bytes: [u8; 32] = entry
+                        .pubkey
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| "invalid pubkey")?;
+                    let vk = ed25519_dalek::VerifyingKey::from_bytes(&pubkey_bytes)?;
+                    let b58 = keys::encode_pubkey(&vk);
+                    if entry.comment.is_empty() {
+                        println!("sqssh-ed25519 {b58}");
+                    } else {
+                        println!("sqssh-ed25519 {b58} {}", entry.comment);
+                    }
+                }
             }
         }
         AgentResponse::Error { message } => {
