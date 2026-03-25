@@ -1579,10 +1579,12 @@ dependencies = [
 [[package]]
 name = "squic"
 version = "0.1.0"
-source = "git+https://github.com/wave-cl/squic-rust#a3d6d01a6f6c77f6995bedf617826aa32380b688"
+source = "git+https://github.com/wave-cl/squic-rust#5ac39a8718cb7910e3838188a32024392435520b"
 dependencies = [
+ "chacha20poly1305",
  "curve25519-dalek",
  "ed25519-dalek",
+ "getrandom 0.3.4",
  "hex",
  "hmac",
  "quinn",
