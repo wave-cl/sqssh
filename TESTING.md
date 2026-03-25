@@ -483,28 +483,12 @@ echo -e "pwd\nquit" | sqsftp -F /tmp/sqssh_test_config -i /tmp/test_key testhost
 
 ---
 
-## A11. Ctrl+C Handling
-
-### A11.1 Ctrl+C doesn't kill session
-```
-sqssh -i /tmp/test_key $SERVER_A "sleep 100" &
-PID=$!
-sleep 2
-kill -INT $PID
-sleep 1
-# sqssh should still be running (sleep interrupted, not sqssh)
-kill -0 $PID 2>/dev/null && echo PASS || echo FAIL
-kill $PID 2>/dev/null; wait $PID 2>/dev/null
-```
-
----
-
-## A12. File and Socket Permissions
+## A11. File and Socket Permissions
 
 > **Note:** A12.3 and A12.4 are destructive — they temporarily modify authorized_keys.
 > This section runs last, just before cleanup.
 
-### A12.1 Client-side permissions
+### A11.1 Client-side permissions
 ```
 stat -f "%Lp" ~/.sqssh/id_ed25519       # Expect: 600
 stat -f "%Lp" ~/.sqssh/id_ed25519.pub   # Expect: 644
@@ -512,7 +496,7 @@ stat -f "%Lp" ~/.sqssh                  # Expect: 700
 stat -f "%Lp" ~/.sqssh/known_hosts      # Expect: 644
 ```
 
-### A12.2 Server-side permissions
+### A11.2 Server-side permissions
 ```
 ssh $SERVER_A "stat -c %a /etc/sqssh/host_key"            # Expect: 600
 ssh $SERVER_A "stat -c %a ~/.sqssh"                        # Expect: 700
@@ -521,7 +505,7 @@ ssh $SERVER_A "stat -c %a /run/sqssh/control.sock 2>/dev/null || \
                stat -c %a /var/run/sqssh/control.sock"     # Expect: 666
 ```
 
-### A12.3 Authorized keys security: symlink rejected
+### A11.3 Authorized keys security: symlink rejected
 ```
 ssh $SERVER_A "cp ~/.sqssh/authorized_keys ~/.sqssh/ak_backup"
 ssh $SERVER_A "rm ~/.sqssh/authorized_keys && ln -s /tmp/evil ~/.sqssh/authorized_keys"
@@ -530,7 +514,7 @@ ssh $SERVER_A "sqsshctl reload-keys"
 ssh $SERVER_A "rm ~/.sqssh/authorized_keys && mv ~/.sqssh/ak_backup ~/.sqssh/authorized_keys"
 ```
 
-### A12.4 Authorized keys security: world-writable rejected
+### A11.4 Authorized keys security: world-writable rejected
 ```
 ssh $SERVER_A "chmod 666 ~/.sqssh/authorized_keys"
 ssh $SERVER_A "sqsshctl reload-keys"
@@ -540,7 +524,7 @@ ssh $SERVER_A "chmod 600 ~/.sqssh/authorized_keys"
 
 ---
 
-## A13. Cleanup (automated)
+## A12. Cleanup (automated)
 ```
 rm -f /tmp/test_key /tmp/test_key.pub /tmp/test_key_a /tmp/test_key_a.pub
 rm -f /tmp/test_key_enc /tmp/test_key_enc.pub /tmp/test_key_c /tmp/test_key_c.pub
@@ -568,7 +552,16 @@ htop
 exit
 ```
 
-### M1.2 Window resize
+### M1.2 Ctrl+C handling
+```
+sqssh -i /tmp/test_key $SERVER_A
+sleep 100
+# Press Ctrl+C
+# Expect: sleep interrupted, shell still alive (requires PTY mode)
+exit
+```
+
+### M1.3 Window resize
 ```
 sqssh -i /tmp/test_key $SERVER_A
 # Resize terminal window by dragging
@@ -577,28 +570,28 @@ stty size
 exit
 ```
 
-### M1.3 Escape: disconnect (~.)
+### M1.4 Escape: disconnect (~.)
 ```
 sqssh -i /tmp/test_key $SERVER_A
 # Press Enter, then type ~.
 # Expect: immediate disconnect
 ```
 
-### M1.4 Escape: help (~?)
+### M1.5 Escape: help (~?)
 ```
 sqssh -i /tmp/test_key $SERVER_A
 # Press Enter, then type ~?
 # Expect: escape sequence help listing
 ```
 
-### M1.5 Escape: literal tilde (~~)
+### M1.6 Escape: literal tilde (~~)
 ```
 sqssh -i /tmp/test_key $SERVER_A
 # Press Enter, then type ~~
 # Expect: single ~ sent to remote shell
 ```
 
-### M1.6 Passphrase-protected key
+### M1.7 Passphrase-protected key
 ```
 sqssh $SERVER_A
 # Expect: passphrase prompt
