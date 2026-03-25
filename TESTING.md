@@ -285,9 +285,46 @@ wait
 
 ---
 
-## A7. File and Socket Permissions
+## A7. Error Handling
 
-### A7.1 Client-side permissions
+### A7.1 Unknown host
+```
+sqssh -i /tmp/test_key user@192.0.2.1
+# Expect: "unknown host" error
+```
+
+### A7.2 File not found (download)
+```
+sqscp -i /tmp/test_key $SERVER_A:/nonexistent/file /tmp/
+# Expect: "No such file or directory" error
+```
+
+### A7.3 Directory without -r
+```
+sqscp -i /tmp/test_key /tmp/test_dir $SERVER_A:/tmp/
+# Expect: "is a directory (use -r)" error
+```
+
+### A7.4 Wrong passphrase
+```
+echo "wrong" | sqssh $SERVER_A
+# Expect: "decryption failed (wrong passphrase?)"
+```
+
+### A7.5 Agent not running
+```
+SQSSH_AGENT_SOCK=/tmp/nonexistent.sock sqssh-add -l
+# Expect: connection error
+```
+
+---
+
+## A8. File and Socket Permissions
+
+> **Note:** A8.3 and A8.4 are destructive — they temporarily modify authorized_keys.
+> Run these last, before cleanup.
+
+### A8.1 Client-side permissions
 ```
 stat -f "%Lp" ~/.sqssh/id_ed25519       # Expect: 600
 stat -f "%Lp" ~/.sqssh/id_ed25519.pub   # Expect: 644
@@ -295,7 +332,7 @@ stat -f "%Lp" ~/.sqssh                  # Expect: 700
 stat -f "%Lp" ~/.sqssh/known_hosts      # Expect: 644
 ```
 
-### A7.2 Server-side permissions
+### A8.2 Server-side permissions
 ```
 ssh $SERVER_A "stat -c %a /etc/sqssh/host_key"            # Expect: 600
 ssh $SERVER_A "stat -c %a ~/.sqssh"                        # Expect: 700
@@ -304,7 +341,7 @@ ssh $SERVER_A "stat -c %a /run/sqssh/control.sock 2>/dev/null || \
                stat -c %a /var/run/sqssh/control.sock"     # Expect: 666
 ```
 
-### A7.3 Authorized keys security: symlink rejected
+### A8.3 Authorized keys security: symlink rejected
 ```
 ssh $SERVER_A "cp ~/.sqssh/authorized_keys ~/.sqssh/ak_backup"
 ssh $SERVER_A "rm ~/.sqssh/authorized_keys && ln -s /tmp/evil ~/.sqssh/authorized_keys"
@@ -313,46 +350,12 @@ ssh $SERVER_A "sqsshctl reload-keys"
 ssh $SERVER_A "rm ~/.sqssh/authorized_keys && mv ~/.sqssh/ak_backup ~/.sqssh/authorized_keys"
 ```
 
-### A7.4 Authorized keys security: world-writable rejected
+### A8.4 Authorized keys security: world-writable rejected
 ```
 ssh $SERVER_A "chmod 666 ~/.sqssh/authorized_keys"
 ssh $SERVER_A "sqsshctl reload-keys"
 # Expect: error about permissions
 ssh $SERVER_A "chmod 600 ~/.sqssh/authorized_keys"
-```
-
----
-
-## A8. Error Handling
-
-### A8.1 Unknown host
-```
-sqssh -i /tmp/test_key user@192.0.2.1
-# Expect: "unknown host" error
-```
-
-### A8.2 File not found (download)
-```
-sqscp -i /tmp/test_key $SERVER_A:/nonexistent/file /tmp/
-# Expect: "No such file or directory" error
-```
-
-### A8.3 Directory without -r
-```
-sqscp -i /tmp/test_key /tmp/test_dir $SERVER_A:/tmp/
-# Expect: "is a directory (use -r)" error
-```
-
-### A8.4 Wrong passphrase
-```
-echo "wrong" | sqssh $SERVER_A
-# Expect: "decryption failed (wrong passphrase?)"
-```
-
-### A8.5 Agent not running
-```
-SQSSH_AGENT_SOCK=/tmp/nonexistent.sock sqssh-add -l
-# Expect: connection error
 ```
 
 ---
