@@ -124,6 +124,9 @@ cleanup() {
     # Kill any leftover agent
     pkill -f "sqssh-agent" 2>/dev/null || true
     rm -f ~/.sqssh/agent.sock
+    # Remove test keys from server authorized_keys
+    ssh "$SERVER_A" "sed -i '/automated-test/d' ~/.sqssh/authorized_keys 2>/dev/null; \
+        sqsshctl reload-keys --all 2>/dev/null" 2>/dev/null || true
 }
 trap cleanup EXIT
 

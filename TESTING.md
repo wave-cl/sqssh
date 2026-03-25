@@ -838,7 +838,7 @@ ssh $SERVER_A "chmod 600 ~/.sqssh/authorized_keys"
 
 ---
 
-## A15. Cleanup (automated)
+## A16. Cleanup (automated)
 ```
 rm -f /tmp/test_key /tmp/test_key.pub /tmp/test_key_a /tmp/test_key_a.pub
 rm -f /tmp/test_key_enc /tmp/test_key_enc.pub /tmp/test_key_c /tmp/test_key_c.pub
@@ -848,7 +848,13 @@ rm -rf /tmp/test_dir /tmp/test_dir_dl
 rm -f /tmp/unknown_key /tmp/unknown_key.pub
 rm -f /tmp/sqssh_test_config /tmp/sftp_batch
 rm -f ~/.sqssh/config.bak
+# Server-side: remove test keys from authorized_keys and reload whitelist
+ssh SERVER "sed -i '/automated-test/d' ~/.sqssh/authorized_keys"
+ssh SERVER "sqsshctl reload-keys --all"
 ```
+
+Note: cleanup runs via a trap on EXIT, ensuring test keys are removed from
+the server even when tests fail or are interrupted.
 
 ---
 
