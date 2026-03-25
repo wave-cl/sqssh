@@ -1,10 +1,32 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
 
 # sqssh automated test suite
-# Usage: ./tests/run.sh [user@host]
+# Usage: ./tests/run.sh [user@host] [A1 A3.2 A12 ...]
+#        ./tests/run.sh --no-setup root@host A12
+#
+# Examples:
+#   ./tests/run.sh                              # all tests, default server
+#   ./tests/run.sh root@host                    # all tests, custom server
+#   ./tests/run.sh root@host A3 A4             # sections A3 and A4 only
+#   ./tests/run.sh root@host A12.6             # single test A12.6
+#   ./tests/run.sh --no-setup root@host A12    # skip setup, run A12 only
 
-SERVER_A="${1:-${SERVER_A:-root@167.235.197.87}}"
+# Parse arguments
+SERVER_A="${SERVER_A:-root@167.235.197.87}"
+FILTERS=()
+NO_SETUP=false
+
+for arg in "$@"; do
+    if [[ "$arg" == "--no-setup" ]]; then
+        NO_SETUP=true
+    elif [[ "$arg" == *@* ]]; then
+        SERVER_A="$arg"
+    else
+        FILTERS+=("$arg")
+    fi
+done
+
 TMPDIR="/tmp/sqssh-test-$$"
 mkdir -p "$TMPDIR"
 
@@ -53,6 +75,38 @@ else
     timeout_cmd() { timeout "$@"; }
 fi
 
+# Test filtering
+should_run() {
+    local test_id="$1"
+    if [[ ${#FILTERS[@]} -eq 0 ]]; then return 0; fi
+    for f in "${FILTERS[@]}"; do
+        # Exact match (A12.6) or prefix match (A12 matches A12.*)
+        if [[ "$test_id" == "$f" || "$test_id" == "$f."* ]]; then return 0; fi
+    done
+    return 1
+}
+
+should_run_section() {
+    local section="$1"  # e.g. "A12"
+    if [[ ${#FILTERS[@]} -eq 0 ]]; then return 0; fi
+    for f in "${FILTERS[@]}"; do
+        if [[ "$f" == "$section" || "$f" == "$section."* ]]; then return 0; fi
+    done
+    return 1
+}
+
+# Wait for a condition (polling)
+wait_for() {
+    local cmd="$1" max="${2:-5}" interval="${3:-0.2}"
+    local i=0
+    local max_i=$(echo "$max / $interval" | bc)
+    while ! eval "$cmd" 2>/dev/null; do
+        sleep "$interval"
+        i=$((i + 1))
+        if [[ $i -ge $max_i ]]; then return 1; fi
+    done
+}
+
 cleanup() {
     rm -rf "$TMPDIR"
     rm -f /tmp/test_key /tmp/test_key.pub /tmp/test_key_a /tmp/test_key_a.pub
@@ -73,7 +127,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
+SKIP_SECTION=false
+
 pass() {
+    if [[ "$SKIP_SECTION" == "true" ]] || ! should_run "$1"; then return 0; fi
     TOTAL=$((TOTAL + 1))
     PASSED=$((PASSED + 1))
     SECTION_TOTAL=$((SECTION_TOTAL + 1))
@@ -82,6 +139,7 @@ pass() {
 }
 
 fail() {
+    if [[ "$SKIP_SECTION" == "true" ]] || ! should_run "$1"; then return 0; fi
     TOTAL=$((TOTAL + 1))
     FAILED=$((FAILED + 1))
     SECTION_TOTAL=$((SECTION_TOTAL + 1))
@@ -94,35 +152,55 @@ fail() {
     exit 1
 }
 
+# Run a test block only if it matches filters
+run_test() {
+    local id="$1"
+    if [[ "$SKIP_SECTION" == "true" ]]; then return 1; fi
+    should_run "$id"
+}
+
 section_start() {
     SECTION_NAME="$1"
     SECTION_TOTAL=0
     SECTION_PASSED=0
-    printf "\n${BOLD}%s${NC}\n" "$1"
+    SECTION_START_TIME=$(date +%s)
+    # Extract section ID (e.g. "A1" from "A1. Key Generation")
+    local section_id="${1%%.*}"
+    if should_run_section "$section_id"; then
+        SKIP_SECTION=false
+        printf "\n${BOLD}%s${NC}\n" "$1"
+    else
+        SKIP_SECTION=true
+    fi
 }
 
 section_end() {
-    SECTIONS+=("$SECTION_NAME|$SECTION_PASSED/$SECTION_TOTAL")
-    if [[ $SECTION_PASSED -eq $SECTION_TOTAL ]]; then
-        printf "${GREEN}  %s: %d/%d passed${NC}\n" "$SECTION_NAME" "$SECTION_PASSED" "$SECTION_TOTAL"
+    if [[ "$SKIP_SECTION" == "true" ]]; then return; fi
+    local elapsed=$(( $(date +%s) - SECTION_START_TIME ))
+    SECTIONS+=("$SECTION_NAME|$SECTION_PASSED/$SECTION_TOTAL|${elapsed}s")
+    if [[ $SECTION_TOTAL -eq 0 ]]; then
+        printf "${YELLOW}  %s: skipped${NC}\n" "$SECTION_NAME"
+    elif [[ $SECTION_PASSED -eq $SECTION_TOTAL ]]; then
+        printf "${GREEN}  %s: %d/%d passed (%ds)${NC}\n" "$SECTION_NAME" "$SECTION_PASSED" "$SECTION_TOTAL" "$elapsed"
     else
-        printf "${RED}  %s: %d/%d passed${NC}\n" "$SECTION_NAME" "$SECTION_PASSED" "$SECTION_TOTAL"
+        printf "${RED}  %s: %d/%d passed (%ds)${NC}\n" "$SECTION_NAME" "$SECTION_PASSED" "$SECTION_TOTAL" "$elapsed"
     fi
 }
 
 print_summary() {
     printf "\n${BOLD}Summary${NC}\n"
-    printf "%-35s %s\n" "Section" "Result"
-    printf "%-35s %s\n" "---" "---"
+    printf "%-35s %-12s %s\n" "Section" "Result" "Time"
+    printf "%-35s %-12s %s\n" "---" "---" "---"
     for s in "${SECTIONS[@]}"; do
-        IFS='|' read -r name result <<< "$s"
-        printf "%-35s %s\n" "$name" "$result"
+        IFS='|' read -r name result elapsed <<< "$s"
+        printf "%-35s %-12s %s\n" "$name" "$result" "$elapsed"
     done
-    printf "%-35s %s\n" "---" "---"
+    printf "%-35s %-12s\n" "---" "---"
+    local total_elapsed=$(( $(date +%s) - SUITE_START ))
     if [[ $FAILED -eq 0 ]]; then
-        printf "${GREEN}%-35s %d/%d passed${NC}\n" "TOTAL" "$PASSED" "$TOTAL"
+        printf "${GREEN}%-35s %-12s %s${NC}\n" "TOTAL" "$PASSED/$TOTAL passed" "${total_elapsed}s"
     else
-        printf "${RED}%-35s %d/%d passed (%d failed)${NC}\n" "TOTAL" "$PASSED" "$TOTAL" "$FAILED"
+        printf "${RED}%-35s %-12s %s${NC}\n" "TOTAL" "$PASSED/$TOTAL ($FAILED failed)" "${total_elapsed}s"
     fi
 }
 
@@ -131,8 +209,16 @@ printf "${BOLD}sqssh automated test suite${NC}\n"
 printf "Server: %s\n" "$SERVER_A"
 printf "Date:   %s\n" "$(date)"
 printf "Temp:   %s\n" "$TMPDIR"
+if [[ ${#FILTERS[@]} -gt 0 ]]; then
+    printf "Filter: %s\n" "${FILTERS[*]}"
+fi
+SUITE_START=$(date +%s)
+HOST_IP=$(echo "$SERVER_A" | cut -d@ -f2)
 
 # ─── A0. Setup ────────────────────────────────────────────────────────────────
+if [[ "$NO_SETUP" == "true" ]]; then
+    printf "\n${YELLOW}A0. Setup: skipped (--no-setup)${NC}\n"
+else
 section_start "A0. Setup"
 
 # A0.1
@@ -164,8 +250,7 @@ ssh "$SERVER_A" "grep -qF '$TESTPUB' ~/.sqssh/authorized_keys 2>/dev/null || \
 
 # A0.5
 ssh "$SERVER_A" "systemctl restart sqsshd" 2>/dev/null
-sleep 2
-ssh "$SERVER_A" "systemctl is-active sqsshd" 2>/dev/null | grep -q active \
+wait_for "ssh '$SERVER_A' 'systemctl is-active sqsshd' 2>/dev/null | grep -q active" 5 0.3 \
     && pass "A0.5" "Restart sqsshd" || fail "A0.5" "Restart sqsshd"
 
 # A0.6
@@ -174,9 +259,11 @@ echo "$OUT" | grep -q "setup-ok" \
     && pass "A0.6" "sqssh connectivity" || fail "A0.6" "sqssh connectivity" "$OUT"
 
 section_end
+fi  # end NO_SETUP
 
 # ─── A1. Key Generation ──────────────────────────────────────────────────────
 section_start "A1. Key Generation"
+if [[ "$SKIP_SECTION" != "true" ]]; then
 
 # A1.1
 sqssh-keygen -f /tmp/test_key_a -C "test" -N "" > /dev/null 2>&1
@@ -202,10 +289,12 @@ P3=$(local_perm ~/.sqssh)
 [[ "$P1" == "600" && "$P2" == "644" && "$P3" == "700" ]] \
     && pass "A1.4" "File permissions ($P1/$P2/$P3)" || fail "A1.4" "File permissions" "Got: $P1/$P2/$P3"
 
+fi
 section_end
 
 # ─── A2. Known Hosts ─────────────────────────────────────────────────────────
 section_start "A2. Known Hosts"
+if [[ "$SKIP_SECTION" != "true" ]]; then
 
 PUBKEY=$(ssh "$SERVER_A" "sqsshd --show-pubkey" 2>/dev/null)
 
@@ -224,10 +313,12 @@ sqssh-keyscan remove "*.internal" > /dev/null 2>&1
 [[ $R1 -eq 1 ]] \
     && pass "A2.2" "Wildcard patterns" || fail "A2.2" "Wildcard patterns"
 
+fi
 section_end
 
 # ─── A3. Remote Command ──────────────────────────────────────────────────────
 section_start "A3. Remote Command"
+if [[ "$SKIP_SECTION" != "true" ]]; then
 
 # A3.1
 OUT=$(sqssh -i /tmp/test_key "$SERVER_A" "echo hello" 2>/dev/null)
@@ -266,10 +357,12 @@ C3=$(grep -c "c3" "$TMPDIR/c3" 2>/dev/null || echo 0)
 [[ $C1 -ge 1 && $C2 -ge 1 && $C3 -ge 1 ]] \
     && pass "A3.6" "Concurrent connections" || fail "A3.6" "Concurrent connections"
 
+fi
 section_end
 
 # ─── A4. File Copy ────────────────────────────────────────────────────────────
 section_start "A4. File Copy"
+if [[ "$SKIP_SECTION" != "true" ]]; then
 
 # A4.1
 dd if=/dev/urandom of=/tmp/test_upload bs=1M count=10 2>/dev/null
@@ -336,10 +429,12 @@ OUT=$(sqscp -i /tmp/test_key /tmp/test_dir "$SERVER_A":/tmp/ 2>&1 || true)
 echo "$OUT" | grep -qi "directory\|recursive\|\-r" \
     && pass "A4.10" "Dir without -r error" || fail "A4.10" "Dir without -r error" "$OUT"
 
+fi
 section_end
 
 # ─── A5. Server Control ──────────────────────────────────────────────────────
 section_start "A5. Server Control"
+if [[ "$SKIP_SECTION" != "true" ]]; then
 
 OUT=$(ssh "$SERVER_A" "sqsshctl reload-keys" 2>&1)
 echo "$OUT" | grep -qi "reload" \
@@ -349,10 +444,12 @@ OUT=$(ssh "$SERVER_A" "sqsshctl reload-keys --all" 2>&1)
 echo "$OUT" | grep -qi "reload" \
     && pass "A5.2" "Reload all keys" || fail "A5.2" "Reload all keys" "$OUT"
 
+fi
 section_end
 
 # ─── A6. Server Features ─────────────────────────────────────────────────────
 section_start "A6. Server Features"
+if [[ "$SKIP_SECTION" != "true" ]]; then
 
 # A6.1
 OUT=$(ssh "$SERVER_A" "sqsshd --show-pubkey" 2>/dev/null)
@@ -362,13 +459,12 @@ OUT=$(ssh "$SERVER_A" "sqsshd --show-pubkey" 2>/dev/null)
 # A6.2
 sqssh -i /tmp/test_key "$SERVER_A" "sleep 30" > /dev/null 2>&1 &
 PID=$!
-sleep 2
+sleep 1
 ssh "$SERVER_A" "systemctl stop sqsshd" 2>/dev/null
-sleep 8
-kill -0 $PID 2>/dev/null && R=FAIL || R=PASS
+# Poll for client to die (max 5s)
+wait_for "! kill -0 $PID" 5 0.5 && R=PASS || R=FAIL
 ssh "$SERVER_A" "systemctl start sqsshd" 2>/dev/null
-sleep 2
-ssh "$SERVER_A" "systemctl is-active sqsshd" 2>/dev/null | grep -q active \
+wait_for "ssh '$SERVER_A' 'systemctl is-active sqsshd' 2>/dev/null | grep -q active" 5 0.3 \
     || fail "A6.2" "Graceful shutdown" "sqsshd failed to restart"
 [[ "$R" == "PASS" ]] \
     && pass "A6.2" "Graceful shutdown" || fail "A6.2" "Graceful shutdown" "Client still alive"
@@ -401,10 +497,12 @@ wait
 grep -q "m1" "$TMPDIR/m1" && grep -q "m2" "$TMPDIR/m2" && grep -q "m3" "$TMPDIR/m3" \
     && pass "A6.6" "Multiple connections" || fail "A6.6" "Multiple connections"
 
+fi
 section_end
 
 # ─── A7. Error Handling ──────────────────────────────────────────────────────
 section_start "A7. Error Handling"
+if [[ "$SKIP_SECTION" != "true" ]]; then
 
 OUT=$(sqssh -i /tmp/test_key user@192.0.2.1 2>&1 || true)
 echo "$OUT" | grep -qi "unknown host" \
@@ -426,10 +524,12 @@ OUT=$(SQSSH_AGENT_SOCK=/tmp/nonexistent.sock sqssh-add -l 2>&1 || true)
 echo "$OUT" | grep -qi "error\|connect\|No such\|refused" \
     && pass "A7.5" "Agent not running" || fail "A7.5" "Agent not running" "$OUT"
 
+fi
 section_end
 
 # ─── A8. SFTP ─────────────────────────────────────────────────────────────────
 section_start "A8. SFTP"
+if [[ "$SKIP_SECTION" != "true" ]]; then
 
 OUT=$(printf "pwd\ncd /tmp\npwd\nquit\n" | sqsftp -i /tmp/test_key "$SERVER_A" 2>&1)
 echo "$OUT" | grep -q "/tmp" \
@@ -456,17 +556,19 @@ OUT=$(printf "cd ~\npwd\nquit\n" | sqsftp -i /tmp/test_key "$SERVER_A" 2>&1)
 echo "$OUT" | grep -q "root\|home" \
     && pass "A8.7" "Tilde expansion" || fail "A8.7" "Tilde expansion" "$OUT"
 
+fi
 section_end
 
 # ─── A9. Key Agent ────────────────────────────────────────────────────────────
 section_start "A9. Key Agent"
+if [[ "$SKIP_SECTION" != "true" ]]; then
 
 pkill -f sqssh-agent 2>/dev/null || true
 rm -f ~/.sqssh/agent.sock
 sqssh-agent > /dev/null 2>&1 &
 AGENT_PID=$!
 export SQSSH_AGENT_SOCK=~/.sqssh/agent.sock
-sleep 1
+sleep 0.3
 
 # A9.1
 sqssh-add /tmp/test_key > /dev/null 2>&1
@@ -497,10 +599,12 @@ rm -f ~/.sqssh/agent.sock
 echo "$OUT" | grep -qi "exist\|already\|stale\|use\|busy\|Address" \
     && pass "A9.4" "Stale socket detection" || fail "A9.4" "Stale socket detection" "$OUT"
 
+fi
 section_end
 
 # ─── A10. Configuration ──────────────────────────────────────────────────────
 section_start "A10. Configuration"
+if [[ "$SKIP_SECTION" != "true" ]]; then
 
 HOST_IP=$(echo "$SERVER_A" | cut -d@ -f2)
 
@@ -541,10 +645,12 @@ OUT=$(printf "pwd\nquit\n" | sqsftp -F /tmp/sqssh_test_config -i /tmp/test_key t
 echo "$OUT" | grep -q "root\|home\|/" \
     && pass "A10.4" "sqsftp with -F" || fail "A10.4" "sqsftp with -F" "$OUT"
 
+fi
 section_end
 
 # ─── A11. Permissions ────────────────────────────────────────────────────────
 section_start "A11. Permissions"
+if [[ "$SKIP_SECTION" != "true" ]]; then
 
 # A11.1 (client-side)
 if [[ -f ~/.sqssh/id_ed25519 ]]; then
@@ -564,10 +670,12 @@ AK=$(ssh "$SERVER_A" "stat -c %a ~/.sqssh/authorized_keys" 2>/dev/null | tr -d '
 [[ "$HK" == "600" && "$SD" == "700" && "$AK" == "600" ]] \
     && pass "A11.2" "Server permissions ($HK/$SD/$AK)" || fail "A11.2" "Server permissions" "$HK/$SD/$AK"
 
+fi
 section_end
 
 # ─── A12. CLI Flag Compatibility ─────────────────────────────────────────────
 section_start "A12. CLI Flags"
+if [[ "$SKIP_SECTION" != "true" ]]; then
 
 # A12.1
 sqssh --version 2>&1 | grep -q "sqssh" \
@@ -720,9 +828,9 @@ rm -f ~/.sqssh/agent.sock
 sqssh-agent > /dev/null 2>&1 &
 AGENT_PID=$!
 disown $AGENT_PID
-sleep 1
+sleep 0.3
 sqssh-agent -k > /dev/null 2>&1 || true
-sleep 1
+sleep 0.3
 kill -0 $AGENT_PID 2>/dev/null && R=FAIL || R=PASS
 [[ "$R" == "PASS" ]] \
     && pass "A12.27" "sqssh-agent -k kill" || fail "A12.27" "sqssh-agent -k kill"
@@ -738,7 +846,7 @@ rm -f ~/.sqssh/agent.sock
 sqssh-agent > /dev/null 2>&1 &
 AGENT_PID=$!
 export SQSSH_AGENT_SOCK=~/.sqssh/agent.sock
-sleep 1
+sleep 0.3
 sqssh-add /tmp/test_key > /dev/null 2>&1
 OUT=$(sqssh-add -L 2>&1)
 echo "$OUT" | grep -q "sqssh-ed25519" \
@@ -753,7 +861,7 @@ rm -f ~/.sqssh/agent.sock
 sqssh-agent > /dev/null 2>&1 &
 AGENT_PID=$!
 export SQSSH_AGENT_SOCK=~/.sqssh/agent.sock
-sleep 1
+sleep 0.3
 OUT=$(sqssh-add -q /tmp/test_key 2>&1)
 [[ -z "$OUT" || ! "$OUT" =~ "added" ]] \
     && pass "A12.30" "sqssh-add -q quiet" || fail "A12.30" "sqssh-add -q quiet" "$OUT"
@@ -786,10 +894,12 @@ sqssh-copy-id --version 2>&1 | grep -q "sqssh-copy-id" \
 sqsshctl --version 2>&1 | grep -q "sqsshctl" \
     && pass "A12.35" "sqsshctl --version" || fail "A12.35" "sqsshctl --version"
 
+fi
 section_end
 
 # ─── A13. Destructive Security ───────────────────────────────────────────────
 section_start "A13. Destructive Security"
+if [[ "$SKIP_SECTION" != "true" ]]; then
 
 # A13.1
 ssh "$SERVER_A" "cp ~/.sqssh/authorized_keys ~/.sqssh/ak_backup" 2>/dev/null
@@ -806,12 +916,15 @@ ssh "$SERVER_A" "chmod 600 ~/.sqssh/authorized_keys" 2>/dev/null
 echo "$OUT" | grep -qi "permission\|writable\|error\|denied\|reject\|insecure" \
     && pass "A13.2" "World-writable rejected" || fail "A13.2" "World-writable rejected" "$OUT"
 
+fi
 section_end
 
 # ─── A14. Cleanup ────────────────────────────────────────────────────────────
 section_start "A14. Cleanup"
+if [[ "$SKIP_SECTION" != "true" ]]; then
 # cleanup happens via trap
 pass "A14" "Cleanup (via trap)"
+fi
 section_end
 
 # ─── Summary ─────────────────────────────────────────────────────────────────
