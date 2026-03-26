@@ -320,7 +320,7 @@ async fn upload_file_raw(
     bw_limit_kbps: u64,
     progress: &Progress,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use std::io::Read;
+
 
     let meta = std::fs::metadata(local_path)?;
     let size = meta.len();
@@ -347,7 +347,7 @@ async fn upload_file_raw(
         .map_err(|e| format!("failed to write header: {e}"))?;
 
     // Stream raw file data
-    let mut file = std::fs::File::open(local_path)?;
+    let mut file = tokio::fs::File::open(local_path).await?;
     let mut buf = vec![0u8; RAW_CHUNK_SIZE];
     let bytes_per_tick = if bw_limit_kbps > 0 {
         bw_limit_kbps * 1024 / 10
@@ -357,8 +357,9 @@ async fn upload_file_raw(
     let mut sent_this_tick: u64 = 0;
     let mut tick_start = Instant::now();
 
+    use tokio::io::AsyncReadExt;
     loop {
-        let n = file.read(&mut buf)?;
+        let n = file.read(&mut buf).await?;
         if n == 0 {
             break;
         }
@@ -555,18 +556,34 @@ async fn download(
             }
 
             let file_entries: Vec<_> = entries.iter().filter(|e| !e.is_dir).cloned().collect();
+            let total_files = file_entries.len();
             let total_bytes: u64 = file_entries.iter().map(|e| e.size).sum();
-            let progress = Arc::new(Progress::new(file_entries.len(), cli.quiet));
+            let progress = Arc::new(Progress::new(total_files, cli.quiet));
             progress.set_total_bytes(total_bytes);
 
-            // Server will send uni streams for each file
+            // Accept streams as they arrive from server, process up to j concurrently
             let sem = Arc::new(Semaphore::new(cli.jobs));
             let mut handles = Vec::new();
+            let mut received = 0;
 
-            for entry in file_entries.into_iter() {
+            while received < total_files {
+                let mut recv = conn.accept_uni().await
+                    .map_err(|e| format!("failed to accept download stream: {e}"))?;
+
+                // Read type byte
+                let mut tb = [0u8; 1];
+                recv.read_exact(&mut tb).await
+                    .map_err(|e| format!("failed to read stream type: {e}"))?;
+
+                if tb[0] != RAW_DOWNLOAD_DATA {
+                    return Err(format!("unexpected stream type: {:#x}", tb[0]).into());
+                }
+
+                let header = RawFileHeader::decode(&mut recv).await?;
+                let local_path = dest.join(&header.path);
+                let file_path = header.path.clone();
+
                 let sem = sem.clone();
-                let conn = conn.clone();
-                let dest = dest.clone();
                 let progress = progress.clone();
                 let preserve = cli.preserve;
                 let bw_limit = cli.limit;
@@ -574,32 +591,18 @@ async fn download(
                 let handle = tokio::spawn(async move {
                     let _permit = sem.acquire().await.unwrap();
 
-                    // Accept uni stream from server
-                    let mut recv = conn.accept_uni().await
-                        .map_err(|e| format!("failed to accept download stream: {e}"))?;
-
-                    // Read type byte
-                    let mut tb = [0u8; 1];
-                    recv.read_exact(&mut tb).await
-                        .map_err(|e| format!("failed to read stream type: {e}"))?;
-
-                    if tb[0] != RAW_DOWNLOAD_DATA {
-                        return Err(format!("unexpected stream type: {:#x}", tb[0]).into());
-                    }
-
-                    let header = RawFileHeader::decode(&mut recv).await?;
-                    let local_path = dest.join(&header.path);
                     if let Some(parent) = local_path.parent() {
                         std::fs::create_dir_all(parent).ok();
                     }
 
                     download_file_raw(&mut recv, &local_path, &header, preserve, bw_limit, &progress).await?;
-                    progress.file_done(&entry.path);
+                    progress.file_done(&file_path);
 
                     Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
                 });
 
                 handles.push(handle);
+                received += 1;
             }
 
             let mut errors = 0;
@@ -763,14 +766,14 @@ async fn download_file_raw(
     bw_limit_kbps: u64,
     progress: &Progress,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
+    use tokio::io::AsyncWriteExt;
 
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).ok();
+        tokio::fs::create_dir_all(parent).await.ok();
     }
 
-    let mut file = std::fs::File::create(path)?;
+    let mut file = tokio::fs::File::create(path).await?;
     let mut written: u64 = 0;
     let mut buf = vec![0u8; RAW_CHUNK_SIZE];
     let bytes_per_tick = if bw_limit_kbps > 0 {
@@ -784,7 +787,7 @@ async fn download_file_raw(
     loop {
         match recv.read(&mut buf).await {
             Ok(Some(n)) => {
-                file.write_all(&buf[..n])?;
+                file.write_all(&buf[..n]).await?;
                 written += n as u64;
                 progress.add_transferred(n as u64);
 
@@ -806,7 +809,7 @@ async fn download_file_raw(
         }
     }
 
-    file.flush()?;
+    file.flush().await?;
     drop(file);
 
     if written != header.size {

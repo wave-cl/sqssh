@@ -177,15 +177,13 @@ pub async fn receive_raw_file(
 
 /// Send a file on a raw unidirectional QUIC stream (server → client).
 async fn send_file_raw(
-    conn: &quinn::Connection,
-    path: &Path,
-    relative_path: &str,
+    conn: quinn::Connection,
+    path: PathBuf,
+    relative_path: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    use std::io::Read;
-
-    let meta = std::fs::metadata(path)?;
+    let meta = std::fs::metadata(&path)?;
     let header = RawFileHeader {
-        path: relative_path.to_string(),
+        path: relative_path,
         size: meta.len(),
         mode: meta.mode(),
         mtime: meta.mtime() as u64,
@@ -199,12 +197,12 @@ async fn send_file_raw(
     send.write_all(&header.encode_download()).await
         .map_err(|e| format!("failed to write download header: {e}"))?;
 
-    // Stream raw file data
-    let mut file = std::fs::File::open(path)?;
+    // Stream raw file data using async I/O to avoid blocking tokio
+    let mut file = tokio::fs::File::open(&path).await?;
     let mut buf = vec![0u8; RAW_CHUNK_SIZE];
 
     loop {
-        let n = file.read(&mut buf)?;
+        let n = tokio::io::AsyncReadExt::read(&mut file, &mut buf).await?;
         if n == 0 {
             break;
         }
@@ -416,11 +414,23 @@ pub async fn handle_raw_download(
         send.write_all(&manifest).await
             .map_err(|e| format!("failed to send manifest: {e}"))?;
 
-        // Send each file on a separate uni stream
+        // Send each file on a separate uni stream, limit concurrency to avoid
+        // exceeding QUIC max_concurrent_uni_streams
         let file_entries: Vec<_> = entries.iter().filter(|e| !e.is_dir).collect();
+        let sem = Arc::new(tokio::sync::Semaphore::new(std::cmp::min(jobs as usize, 64)));
+        let mut handles = Vec::with_capacity(file_entries.len());
         for entry in file_entries {
             let file_path = source.join(&entry.path);
-            send_file_raw(conn, &file_path, &entry.path).await?;
+            let rel_path = entry.path.clone();
+            let conn = conn.clone();
+            let sem = sem.clone();
+            handles.push(tokio::spawn(async move {
+                let _permit = sem.acquire().await.unwrap();
+                send_file_raw(conn, file_path, rel_path).await
+            }));
+        }
+        for handle in handles {
+            handle.await.map_err(|e| format!("task join error: {e}"))??;
         }
     } else if jobs > 1 {
         // Single file, chunked across multiple uni streams
@@ -493,7 +503,7 @@ pub async fn handle_raw_download(
             .file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
-        send_file_raw(conn, &source, &filename).await?;
+        send_file_raw(conn.clone(), source, filename).await?;
     }
 
     Ok(())

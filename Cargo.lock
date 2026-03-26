@@ -1419,7 +1419,7 @@ dependencies = [
 
 [[package]]
 name = "sqscp"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "clap",
  "libc",
@@ -1433,7 +1433,7 @@ dependencies = [
 
 [[package]]
 name = "sqsftp"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "clap",
  "quinn",
@@ -1446,7 +1446,7 @@ dependencies = [
 
 [[package]]
 name = "sqssh"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "bytes",
  "clap",
@@ -1464,7 +1464,7 @@ dependencies = [
 
 [[package]]
 name = "sqssh-add"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "clap",
  "ed25519-dalek",
@@ -1473,7 +1473,7 @@ dependencies = [
 
 [[package]]
 name = "sqssh-agent"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "clap",
  "ed25519-dalek",
@@ -1487,7 +1487,7 @@ dependencies = [
 
 [[package]]
 name = "sqssh-copy-id"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "clap",
  "sqssh-core",
@@ -1499,7 +1499,7 @@ dependencies = [
 
 [[package]]
 name = "sqssh-core"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "argon2",
  "bs58",
@@ -1522,7 +1522,7 @@ dependencies = [
 
 [[package]]
 name = "sqssh-keygen"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "bs58",
  "clap",
@@ -1535,7 +1535,7 @@ dependencies = [
 
 [[package]]
 name = "sqssh-keyscan"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "clap",
  "sqssh-core",
@@ -1543,7 +1543,7 @@ dependencies = [
 
 [[package]]
 name = "sqssh-persist"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "libc",
  "sqssh-core",
@@ -1553,7 +1553,7 @@ dependencies = [
 
 [[package]]
 name = "sqsshctl"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "clap",
  "sqssh-core",
@@ -1561,7 +1561,7 @@ dependencies = [
 
 [[package]]
 name = "sqsshd"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "bytes",
  "clap",
@@ -1579,7 +1579,7 @@ dependencies = [
 [[package]]
 name = "squic"
 version = "0.1.0"
-source = "git+https://github.com/wave-cl/squic-rust#5ac39a8718cb7910e3838188a32024392435520b"
+source = "git+https://github.com/wave-cl/squic-rust#f5b7be4397af8e108a643105551b2d84d9cbb01b"
 dependencies = [
  "chacha20poly1305",
  "curve25519-dalek",
