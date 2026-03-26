@@ -44,126 +44,16 @@ curl -fsSL https://raw.githubusercontent.com/wave-cl/sqssh/main/install.sh | sh 
 | `sqsftp` | ✓ | Interactive file transfer |
 | `sqssh-persist` | ✓ | PTY fd holder for server restarts |
 
-## Quick start
-
-### Generate a keypair
+## Getting started
 
 ```
-sqssh-keygen                                    # prompts for optional passphrase
-sqssh-keygen -f ~/.sqssh/work                   # custom path
-sqssh-keygen --change-passphrase ~/.sqssh/id_ed25519  # change or remove passphrase
+sqssh-keygen                                          # generate your key
+sqssh-keyscan add host.example.com <server-pubkey>     # trust the server
+sqssh user@host                                        # connect
+sqscp -r ./project/ user@host:~/backup/                # copy files
 ```
 
-Creates `~/.sqssh/id_ed25519` and `~/.sqssh/id_ed25519.pub`. Passphrase-protected keys are encrypted with argon2id + chacha20-poly1305.
-
-### Connect to a server
-
-```
-sqssh user@host
-sqssh -p 4022 user@host
-sqssh -i ~/.sqssh/work_key user@host
-sqssh user@host ls -la
-```
-
-Escape sequences: `~.` disconnect, `~?` help, `~~` literal tilde. Auto-reconnects on network loss without re-prompting for passphrase. Exits cleanly on server shutdown. Default connect timeout: 3 seconds (configurable via `ConnectTimeout`).
-
-**Key resolution order:** `-i` flag → config `IdentityFile` → agent → learned `~/.sqssh/key_map` → default `id_ed25519`. On successful connect, the host→key mapping is saved to `key_map` automatically.
-
-### Copy files
-
-```
-sqscp localfile.txt user@host:/remote/path
-sqscp user@host:/remote/file.txt ./
-sqscp -r -j 16 ./project/ user@host:~/backup/
-sqscp -p -l 1000 largefile.bin user@host:/tmp/
-```
-
-Flags: `-r` recursive, `-j N` concurrent streams (default 8), `-p` preserve timestamps, `-P port` UDP port, `-l KB/s` bandwidth limit, `-q` quiet, `-v` verbose.
-
-### Run the server
-
-```
-sqsshd                          # listen on 0.0.0.0:22/udp
-sqsshd --port 4022              # custom port
-sqsshd --show-pubkey            # print server public key
-sqsshd --auth-mode open+user    # disable whitelist, use authorized_keys only
-sqsshd --log-level debug        # trace, debug, info, warn, error
-sqsshd --log-file /var/log/sqsshd.log
-sqsshd --log-json               # JSON-formatted output
-```
-
-Host key: `/etc/sqssh/host_key`. Server config: `/etc/sqssh/sqsshd.conf`.
-
-Handles SIGTERM/SIGINT gracefully — sends SIGHUP to child shells, drains active connections (5s timeout with watchdog), cleans up the control socket, and exits cleanly.
-
-### Zero-downtime restarts
-
-```
-kill -USR1 $(pgrep sqsshd)        # persist sessions
-sqsshd --port 22                  # start new instance, recovers sessions
-```
-
-SIGUSR1 triggers session persistence: PTY master file descriptors are handed off to `sqssh-persist` via SCM_RIGHTS, shell processes survive (they called `setsid`), and the new sqsshd recovers the sessions. Clients auto-reconnect in ~2 seconds and resume where they left off — running processes, tail commands, and terminal state are preserved.
-
-### Manage keys at runtime
-
-```
-sqsshctl reload-keys            # reload your own authorized_keys
-sqsshctl reload-keys --all      # reload all users (root only)
-```
-
-No server restart required. Communicates over Unix socket (`/run/sqssh/control.sock`).
-
-### Key agent
-
-```
-eval $(sqssh-agent)              # start agent, set SQSSH_AGENT_SOCK
-sqssh-add                        # add default key (~/.sqssh/id_ed25519)
-sqssh-add ~/.sqssh/other_key     # add specific key
-sqssh-add -l                     # list keys in agent
-sqssh-add -D                     # remove all keys
-```
-
-When the agent is running, `sqssh` and `sqscp` use it automatically — no `-i` flag needed.
-
-### Deploy keys to a server
-
-```
-sqssh-copy-id user@host                      # deploy default public key
-sqssh-copy-id -i ~/.sqssh/other.pub user@host  # deploy specific key
-```
-
-Appends the key to remote `~/.sqssh/authorized_keys` and triggers `sqsshctl reload-keys`.
-
-### Manage known hosts
-
-Server keys are distributed out-of-band (no TOFU). Use `sqsshd --show-pubkey` on the server, then add it on the client:
-
-```
-sqssh-keyscan add host.example.com <base58-pubkey>
-sqssh-keyscan list
-sqssh-keyscan remove host.example.com
-sqssh-keyscan fingerprint <base58-pubkey>
-```
-
-### Interactive file transfer
-
-```
-sqsftp user@host
-sftp> ls
-sftp> cd /var/log
-sftp> get syslog
-sftp> put localfile.txt
-sftp> mkdir backups
-sftp> stat file.txt
-sftp> rename old.txt new.txt
-sftp> rm temp.txt
-sftp> lpwd
-sftp> lcd ~/Downloads
-sftp> quit
-```
-
-Uses a raw binary protocol on a QUIC bidi stream for navigation and metadata operations, with separate uni streams for file transfers (get/put).
+See the [full guide](docs/guide.md) for server setup, use cases, and tool reference.
 
 ## Authentication
 
