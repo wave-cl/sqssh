@@ -23,11 +23,6 @@ curl -fsSL https://raw.githubusercontent.com/wave-cl/sqssh/main/install.sh | sh
 
 Installs to `/usr/local/bin` (root) or `~/.local/bin` (non-root). Supports Linux and macOS on x86_64 and aarch64.
 
-Override the install directory:
-```
-SQSSH_INSTALL_DIR=~/bin curl -fsSL https://raw.githubusercontent.com/wave-cl/sqssh/main/install.sh | sh
-```
-
 Server install (generates host key, installs systemd service, starts sqsshd):
 ```
 curl -fsSL https://raw.githubusercontent.com/wave-cl/sqssh/main/install.sh | sh -s -- --server
