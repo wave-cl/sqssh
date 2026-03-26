@@ -57,6 +57,17 @@ Three auth modes:
 
 Ed25519 only. No passwords, no RSA, no ECDSA.
 
+### Protocol
+
+- **Transport:** sQUIC over UDP (default port 22)
+- **Crypto:** Ed25519 keys, X25519 key exchange (via sQUIC), argon2id + chacha20-poly1305 for key encryption
+- **Serialization:** MessagePack for control channel only; shell, SFTP, and file transfers use raw binary encoding directly on QUIC streams
+- **ALPN:** `sqssh/1`
+- **Stream 0:** Control channel (auth, disconnect) — msgpack framed
+- **Raw bidi streams:** Shell I/O (`0xB0`), shell control (`0xB1`), SFTP sessions (`0xC0`) — binary encoded, no msgpack
+- **Uni streams:** File transfers (one QUIC stream per file, zero framing overhead)
+- **Framed bidi streams:** Legacy session channel (exec, port forwarding) — msgpack framed
+
 ## Configuration
 
 `~/.sqssh/config` uses SSH-style syntax:
@@ -117,17 +128,6 @@ Known hosts (`~/.sqssh/known_hosts`):
 host.example.com sqssh-ed25519 CEFuAsD7Kn5ABJUb4S2ujJxrasBkpoDJCoaNvnh7qdRu
 *.internal sqssh-ed25519 ...
 ```
-
-## Protocol
-
-- **Transport:** sQUIC over UDP (default port 22)
-- **Crypto:** Ed25519 keys, X25519 key exchange (via sQUIC), argon2id + chacha20-poly1305 for key encryption
-- **Serialization:** MessagePack for control channel only; shell, SFTP, and file transfers use raw binary encoding directly on QUIC streams
-- **ALPN:** `sqssh/1`
-- **Stream 0:** Control channel (auth, disconnect) — msgpack framed
-- **Raw bidi streams:** Shell I/O (`0xB0`), shell control (`0xB1`), SFTP sessions (`0xC0`) — binary encoded, no msgpack
-- **Uni streams:** File transfers (one QUIC stream per file, zero framing overhead)
-- **Framed bidi streams:** Legacy session channel (exec, port forwarding) — msgpack framed
 
 ## Building
 
