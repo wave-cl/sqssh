@@ -28,6 +28,11 @@ Override the install directory:
 SQSSH_INSTALL_DIR=~/bin curl -fsSL https://raw.githubusercontent.com/wave-cl/sqssh/main/install.sh | sh
 ```
 
+Server install (generates host key, installs systemd service, starts sqsshd):
+```
+curl -fsSL https://raw.githubusercontent.com/wave-cl/sqssh/main/install.sh | sh -s -- --server
+```
+
 ## Tools
 
 | Tool | Status | Description |

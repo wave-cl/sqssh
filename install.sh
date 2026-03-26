@@ -3,6 +3,14 @@ set -e
 
 REPO="wave-cl/sqssh"
 INSTALL_DIR="${SQSSH_INSTALL_DIR:-}"
+SERVER_MODE=false
+
+# Parse flags
+for arg in "$@"; do
+    case "$arg" in
+        --server) SERVER_MODE=true ;;
+    esac
+done
 
 info() { printf "  \033[1m%s\033[0m\n" "$1"; }
 err()  { printf "  \033[31merror:\033[0m %s\n" "$1" >&2; exit 1; }
@@ -108,20 +116,129 @@ if [ "$BIN_DIR" = "$HOME/.local/bin" ]; then
     esac
 fi
 
-printf "\n"
-info "Getting started:"
-printf "  Generate a key:        sqssh-keygen\n"
-printf "  With a passphrase:     sqssh-keygen --new-passphrase \"your passphrase\"\n"
-printf "  Show your public key:  sqssh-keygen --print-public\n"
-printf "\n"
-info "Server setup (via SSH):"
-printf "  Install on server:     ssh user@host 'curl -fsSL https://raw.githubusercontent.com/wave-cl/sqssh/main/install.sh | sh'\n"
-printf "  Generate host key:     ssh user@host 'sqssh-keygen -f /etc/sqssh/host_key'\n"
-printf "  Start the server:      ssh user@host 'sqsshd --port 22'\n"
-printf "  Deploy your key:       sqssh-copy-id -i ~/.sqssh/id_ed25519.pub user@host\n"
-printf "  Reload whitelist:      ssh user@host 'sqsshctl reload-keys'\n"
-printf "\n"
-info "Connecting to a server:"
-printf "  Add the server's pubkey:  sqssh-keyscan add <host> <server-pubkey>\n"
-printf "  Connect:                  sqssh user@host\n"
-printf "\n"
+# Server setup
+if [ "$SERVER_MODE" = true ]; then
+    info "Setting up sqsshd server..."
+
+    # Must be root
+    if [ "$(id -u)" -ne 0 ]; then
+        err "--server requires root"
+    fi
+
+    # Must be Linux
+    if [ "$OS_NAME" != "linux" ]; then
+        err "--server is only supported on Linux"
+    fi
+
+    # Create /etc/sqssh with correct permissions
+    mkdir -p /etc/sqssh
+    chmod 755 /etc/sqssh
+
+    # Generate host key if not exists
+    if [ -f /etc/sqssh/host_key ]; then
+        info "Host key already exists, skipping generation"
+    else
+        info "Generating host key..."
+        echo "" | "$BIN_DIR/sqssh-keygen" -f /etc/sqssh/host_key -C "host-key" > /dev/null 2>&1
+        chmod 600 /etc/sqssh/host_key
+        chmod 644 /etc/sqssh/host_key.pub
+        info "Host key generated"
+    fi
+
+    # Write config if not exists
+    if [ -f /etc/sqssh/sqsshd.conf ]; then
+        info "Config already exists, skipping"
+    else
+        info "Writing default config to /etc/sqssh/sqsshd.conf..."
+        cat > /etc/sqssh/sqsshd.conf << 'CONF'
+# sqsshd configuration
+# See README for all directives
+
+Port 22
+HostKey /etc/sqssh/host_key
+AuthMode whitelist+user
+AuthorizedKeysFile .sqssh/authorized_keys
+MaxSessions 64
+MaxAuthTries 6
+ControlSocket /var/run/sqssh/control.sock
+ConnectionMigration yes
+PrintMotd yes
+PrintLastLog yes
+# Banner /etc/sqssh/banner
+# AllowUsers
+# DenyUsers
+CONF
+        chmod 644 /etc/sqssh/sqsshd.conf
+    fi
+
+    # Install systemd service (always overwrite for upgrades)
+    if command -v systemctl >/dev/null 2>&1; then
+        info "Installing systemd service..."
+        cat > /etc/systemd/system/sqsshd.service << 'SVC'
+[Unit]
+Description=sqssh server daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/sqsshd --config /etc/sqssh/sqsshd.conf
+ExecReload=/bin/kill -USR1 $MAINPID
+Restart=on-failure
+RestartSec=2
+RuntimeDirectory=sqssh
+
+[Install]
+WantedBy=multi-user.target
+SVC
+        chmod 644 /etc/systemd/system/sqsshd.service
+        systemctl daemon-reload
+        systemctl enable sqsshd
+
+        if systemctl is-active sqsshd >/dev/null 2>&1; then
+            info "Restarting sqsshd..."
+            systemctl restart sqsshd
+        else
+            info "Starting sqsshd..."
+            systemctl start sqsshd
+        fi
+
+        # Verify
+        sleep 1
+        if systemctl is-active sqsshd >/dev/null 2>&1; then
+            info "sqsshd is running"
+        else
+            err "sqsshd failed to start — check: journalctl -u sqsshd"
+        fi
+    else
+        info "systemd not found — skipping service installation"
+        info "Start manually: sqsshd --config /etc/sqssh/sqsshd.conf"
+    fi
+
+    # Print server pubkey
+    PUBKEY=$(cat /etc/sqssh/host_key.pub 2>/dev/null | awk '{print $2}')
+    printf "\n"
+    info "Server public key:"
+    printf "  %s\n" "$PUBKEY"
+    printf "\n"
+    info "Next steps:"
+    printf "  1. Add user keys:    echo 'sqssh-ed25519 <pubkey> <comment>' >> ~/.sqssh/authorized_keys\n"
+    printf "  2. Reload whitelist: sqsshctl reload-keys --all\n"
+    printf "  3. On client:        sqssh-keyscan add %s %s\n" "$(hostname -f 2>/dev/null || hostname)" "$PUBKEY"
+    printf "\n"
+else
+    printf "\n"
+    info "Getting started:"
+    printf "  Generate a key:        sqssh-keygen\n"
+    printf "  With a passphrase:     sqssh-keygen --new-passphrase \"your passphrase\"\n"
+    printf "  Show your public key:  sqssh-keygen --print-public\n"
+    printf "\n"
+    info "Server setup (via SSH):"
+    printf "  Install and configure:  ssh root@host 'curl -fsSL https://raw.githubusercontent.com/wave-cl/sqssh/main/install.sh | sh -s -- --server'\n"
+    printf "  Deploy your key:        sqssh-copy-id -i ~/.sqssh/id_ed25519.pub user@host\n"
+    printf "  Reload whitelist:       ssh root@host 'sqsshctl reload-keys --all'\n"
+    printf "\n"
+    info "Connecting to a server:"
+    printf "  Add the server's pubkey:  sqssh-keyscan add <host> <server-pubkey>\n"
+    printf "  Connect:                  sqssh user@host\n"
+    printf "\n"
+fi
