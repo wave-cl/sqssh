@@ -244,7 +244,7 @@ else
     printf "  Install server:         ssh root@host 'curl -fsSL https://raw.githubusercontent.com/wave-cl/sqssh/main/install.sh | sh -s -- --server'\n"
     printf "  Add your key:           ssh root@host 'echo \"sqssh-ed25519 <your-pubkey> <comment>\" >> ~/.sqssh/authorized_keys'\n"
     printf "  Reload whitelist:       ssh root@host 'sqsshctl reload-keys --all'\n"
-    printf "  Get server pubkey:      ssh root@host 'cat /etc/sqssh/host_key.pub'\n"
+    printf "  Get server pubkey:      ssh root@host 'sqsshd --show-pubkey'\n"
     printf "\n"
     info "Connecting to a server:"
     printf "  Add the server's pubkey:  sqssh-keyscan add <host> <server-pubkey>\n"
