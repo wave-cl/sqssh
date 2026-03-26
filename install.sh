@@ -234,6 +234,9 @@ SVC
     printf "  2. Reload whitelist: ssh root@%s 'sqsshctl reload-keys --all'\n" "$HOSTNAME"
     printf "  3. On client:        sqssh-keyscan add %s %s\n" "$HOSTNAME" "$PUBKEY"
     printf "\n"
+    info "Connect:"
+    printf "  sqssh root@%s\n" "$HOSTNAME"
+    printf "\n"
 else
     printf "\n"
     info "Getting started:"
