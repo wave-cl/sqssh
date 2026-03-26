@@ -134,6 +134,14 @@ if [ "$SERVER_MODE" = true ]; then
     mkdir -p /etc/sqssh
     chmod 755 /etc/sqssh
 
+    # Create ~/.sqssh directory for root
+    mkdir -p "$HOME/.sqssh"
+    chmod 700 "$HOME/.sqssh"
+    if [ ! -f "$HOME/.sqssh/authorized_keys" ]; then
+        touch "$HOME/.sqssh/authorized_keys"
+        chmod 600 "$HOME/.sqssh/authorized_keys"
+    fi
+
     # Generate host key if not exists
     if [ -f /etc/sqssh/host_key ]; then
         info "Host key already exists, skipping generation"
