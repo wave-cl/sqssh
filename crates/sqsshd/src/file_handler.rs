@@ -415,7 +415,8 @@ pub async fn handle_raw_download(
             .map_err(|e| format!("failed to send manifest: {e}"))?;
 
         // Send each file on a separate uni stream, limit concurrency to avoid
-        // exceeding QUIC max_concurrent_uni_streams
+        // exceeding QUIC max_concurrent_uni_streams.
+        // Acquire permit BEFORE spawning to avoid creating blocked tasks.
         let file_entries: Vec<_> = entries.iter().filter(|e| !e.is_dir).collect();
         let sem = Arc::new(tokio::sync::Semaphore::new(std::cmp::min(jobs as usize, 64)));
         let mut handles = Vec::with_capacity(file_entries.len());
@@ -423,10 +424,11 @@ pub async fn handle_raw_download(
             let file_path = source.join(&entry.path);
             let rel_path = entry.path.clone();
             let conn = conn.clone();
-            let sem = sem.clone();
+            let permit = sem.clone().acquire_owned().await.unwrap();
             handles.push(tokio::spawn(async move {
-                let _permit = sem.acquire().await.unwrap();
-                send_file_raw(conn, file_path, rel_path).await
+                let result = send_file_raw(conn, file_path, rel_path).await;
+                drop(permit);
+                result
             }));
         }
         for handle in handles {

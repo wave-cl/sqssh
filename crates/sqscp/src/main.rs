@@ -561,8 +561,8 @@ async fn download(
             let progress = Arc::new(Progress::new(total_files, cli.quiet));
             progress.set_total_bytes(total_bytes);
 
-            // Accept streams as they arrive from server, process up to j concurrently
-            let sem = Arc::new(Semaphore::new(cli.jobs));
+            // Accept streams as they arrive from server, read immediately
+            // (no client semaphore — server controls concurrency)
             let mut handles = Vec::new();
             let mut received = 0;
 
@@ -583,14 +583,11 @@ async fn download(
                 let local_path = dest.join(&header.path);
                 let file_path = header.path.clone();
 
-                let sem = sem.clone();
                 let progress = progress.clone();
                 let preserve = cli.preserve;
                 let bw_limit = cli.limit;
 
                 let handle = tokio::spawn(async move {
-                    let _permit = sem.acquire().await.unwrap();
-
                     if let Some(parent) = local_path.parent() {
                         std::fs::create_dir_all(parent).ok();
                     }
