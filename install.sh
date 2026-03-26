@@ -228,7 +228,8 @@ SVC
     info "Server public key:"
     printf "  %s\n" "$PUBKEY"
     printf "\n"
-    HOSTNAME="$(hostname -f 2>/dev/null || hostname)"
+    # Prefer public IP for remote access instructions, fall back to hostname
+    HOSTNAME="$(curl -fsSL -m 3 https://ifconfig.me 2>/dev/null || hostname -f 2>/dev/null || hostname)"
     info "Next steps:"
     printf "  1. Add user keys:    ssh root@%s 'echo \"sqssh-ed25519 <pubkey> <comment>\" >> ~/.sqssh/authorized_keys'\n" "$HOSTNAME"
     printf "  2. Reload whitelist: ssh root@%s 'sqsshctl reload-keys --all'\n" "$HOSTNAME"
