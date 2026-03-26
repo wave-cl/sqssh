@@ -21,12 +21,7 @@ Same port number (22), different protocol (UDP instead of TCP). They coexist.
 curl -fsSL https://raw.githubusercontent.com/wave-cl/sqssh/main/install.sh | sh
 ```
 
-Installs to `/usr/local/bin` (root) or `~/.local/bin` (non-root). Supports Linux and macOS on x86_64 and aarch64.
-
-Server install (generates host key, installs systemd service, starts sqsshd):
-```
-curl -fsSL https://raw.githubusercontent.com/wave-cl/sqssh/main/install.sh | sh -s -- --server
-```
+Installs to `/usr/local/bin` (root) or `~/.local/bin` (non-root). Supports Linux and macOS on x86_64 and aarch64. Run with `--server` for server setup (host key, systemd, sqsshd).
 
 ## Getting started
 
