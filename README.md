@@ -28,22 +28,6 @@ Server install (generates host key, installs systemd service, starts sqsshd):
 curl -fsSL https://raw.githubusercontent.com/wave-cl/sqssh/main/install.sh | sh -s -- --server
 ```
 
-## Tools
-
-| Tool | Status | Description |
-|------|--------|-------------|
-| `sqssh` | ✓ | Remote shell and command execution |
-| `sqsshd` | ✓ | Server daemon with two-layer auth |
-| `sqssh-keygen` | ✓ | Ed25519 key generation |
-| `sqscp` | ✓ | Parallel secure file copy |
-| `sqsshctl` | ✓ | Live key reload without restart |
-| `sqssh-agent` | ✓ | Key agent daemon |
-| `sqssh-add` | ✓ | Add/list/remove keys in agent |
-| `sqssh-copy-id` | ✓ | Deploy public keys to remote hosts |
-| `sqssh-keyscan` | ✓ | Manage known hosts |
-| `sqsftp` | ✓ | Interactive file transfer |
-| `sqssh-persist` | ✓ | PTY fd holder for server restarts |
-
 ## Getting started
 
 ```
