@@ -286,24 +286,31 @@ sudo systemctl reload sqsshd    # zero-downtime restart (SIGUSR1)
 
 ## Benchmarks
 
-sqscp vs OpenSSH scp — server-to-server between two Hetzner VPS (Falkenstein ↔ Helsinki), measured median of 3 runs, all transfers md5-verified.
+sqscp vs OpenSSH scp — server-to-server between two Hetzner VPS (Falkenstein ↔ Helsinki), median of 3 runs, all transfers md5-verified.
+
+**Upload (client → server)**
 
 | Test | sqscp | scp | Winner |
 |------|-------|-----|--------|
-| 1KB | 749 KB/s | 4.7 KB/s | **sqscp 159x** |
-| 10MB | 134 MB/s | 32 MB/s | **sqscp 4.2x** |
-| 100MB | 144 MB/s | 171 MB/s | scp 1.2x |
-| 1GB | 163 MB/s | 292 MB/s | scp 1.8x |
-| 1000 × 1KB j=1 | 9.2 MB/s | 0.4 MB/s | **sqscp 23x** |
-| 1000 × 1KB j=4 | 5.8 MB/s | 0.4 MB/s | **sqscp 15x** |
-| 1000 × 1KB j=16 | 8.4 MB/s | 0.4 MB/s | **sqscp 21x** |
-| 1000 × 1KB j=32 | 10.3 MB/s | 0.4 MB/s | **sqscp 26x** |
-| 100 × 1MB j=1 | 141 MB/s | 92 MB/s | **sqscp 1.5x** |
-| 100 × 1MB j=4 | 129 MB/s | 92 MB/s | **sqscp 1.4x** |
-| 100 × 1MB j=16 | 145 MB/s | 92 MB/s | **sqscp 1.6x** |
-| 100 × 1MB j=32 | 127 MB/s | 92 MB/s | **sqscp 1.4x** |
+| 1KB | 1.3 MB/s | 5.4 KB/s | **sqscp 241x** |
+| 10MB | 376 MB/s | 40 MB/s | **sqscp 9.4x** |
+| 100MB | 169 MB/s | 204 MB/s | scp 1.2x |
+| 1GB | 149 MB/s | 161 MB/s | scp 1.1x |
+| 1000 × 1KB (j=8) | 15 MB/s | 0.6 MB/s | **sqscp 25x** |
+| 100 × 1MB (j=8) | 154 MB/s | 134 MB/s | **sqscp 1.1x** |
 
-sqscp wins 10 of 12 tests. It dominates on small files (159x faster on 1KB), many-file transfers (26x on 1000 small files), and medium directories (1.6x on 100×1MB). scp wins on large single-file transfers (100MB+) where TCP's congestion control ramps faster over sustained bulk transfer.
+**Download (server → client)**
+
+| Test | sqscp | scp | Winner |
+|------|-------|-----|--------|
+| 1KB | 2.1 MB/s | 5.7 KB/s | **sqscp 368x** |
+| 10MB | 164 MB/s | 47 MB/s | **sqscp 3.5x** |
+| 100MB | 180 MB/s | 242 MB/s | scp 1.3x |
+| 1GB | 192 MB/s | 376 MB/s | scp 2.0x |
+| 1000 × 1KB (j=8) | 10 MB/s | 0.5 MB/s | **sqscp 20x** |
+| 100 × 1MB (j=8) | 185 MB/s | 130 MB/s | **sqscp 1.4x** |
+
+sqscp wins 8 of 12 tests. Dominates on small files (241-368x faster on 1KB), many-file transfers (20-25x on 1000 small files), and multi-file directories (1.1-1.4x on 100×1MB). scp wins on large single-file transfers (100MB+) where TCP's mature congestion control ramps faster over sustained bulk transfer.
 
 File transfers use raw QUIC streams with zero application-layer framing — file bytes go directly on the wire after a minimal header (path, size, mode, timestamps).
 
