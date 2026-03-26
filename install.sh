@@ -229,7 +229,7 @@ SVC
     printf "  %s\n" "$PUBKEY"
     printf "\n"
     # Prefer public IP for remote access instructions, fall back to hostname
-    HOSTNAME="$(curl -4 -fsSL -m 3 https://ifconfig.me 2>/dev/null || hostname -f 2>/dev/null || hostname)"
+    HOSTNAME="$(curl -4 -fsSL -m 3 https://api.ipify.org 2>/dev/null || curl -4 -fsSL -m 3 https://ifconfig.me 2>/dev/null || hostname -f 2>/dev/null || hostname)"
     info "Next steps:"
     printf "  1. Add user keys:    ssh root@%s 'echo \"sqssh-ed25519 <pubkey> <comment>\" >> ~/.sqssh/authorized_keys'\n" "$HOSTNAME"
     printf "  2. Reload whitelist: ssh root@%s 'sqsshctl reload-keys --all'\n" "$HOSTNAME"
