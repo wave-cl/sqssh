@@ -301,14 +301,9 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             let mut written: u64 = 0;
                             let mut buf = vec![0u8; RAW_CHUNK_SIZE];
 
-                            loop {
-                                match uni_recv.read(&mut buf).await? {
-                                    Some(n) => {
-                                        file.write_all(&buf[..n])?;
-                                        written += n as u64;
-                                    }
-                                    None => break,
-                                }
+                            while let Some(n) = uni_recv.read(&mut buf).await? {
+                                file.write_all(&buf[..n])?;
+                                written += n as u64;
                             }
 
                             file.flush()?;

@@ -9,17 +9,17 @@ pub fn send_fds(socket: &UnixStream, fds: &[RawFd], data: &[u8]) -> io::Result<(
     use std::os::unix::io::AsRawFd;
 
     let fd_bytes = unsafe {
-        std::slice::from_raw_parts(fds.as_ptr() as *const u8, fds.len() * std::mem::size_of::<RawFd>())
+        std::slice::from_raw_parts(fds.as_ptr() as *const u8, std::mem::size_of_val(fds))
     };
 
-    let cmsg_space = unsafe { libc::CMSG_SPACE((fds.len() * std::mem::size_of::<RawFd>()) as u32) } as usize;
+    let cmsg_space = unsafe { libc::CMSG_SPACE(std::mem::size_of_val(fds) as u32) } as usize;
 
     let mut cmsg_buf = vec![0u8; cmsg_space];
 
     let mut iov = libc::iovec {
         iov_base: if data.is_empty() {
             // sendmsg requires at least 1 byte of data
-            b"\0".as_ptr() as *mut libc::c_void
+            c"".as_ptr() as *mut libc::c_void
         } else {
             data.as_ptr() as *mut libc::c_void
         },
@@ -34,13 +34,13 @@ pub fn send_fds(socket: &UnixStream, fds: &[RawFd], data: &[u8]) -> io::Result<(
 
     let cmsg = unsafe { libc::CMSG_FIRSTHDR(&msg) };
     if cmsg.is_null() {
-        return Err(io::Error::new(io::ErrorKind::Other, "CMSG_FIRSTHDR returned null"));
+        return Err(io::Error::other("CMSG_FIRSTHDR returned null"));
     }
 
     unsafe {
         (*cmsg).cmsg_level = libc::SOL_SOCKET;
         (*cmsg).cmsg_type = libc::SCM_RIGHTS;
-        (*cmsg).cmsg_len = libc::CMSG_LEN((fds.len() * std::mem::size_of::<RawFd>()) as u32) as _;
+        (*cmsg).cmsg_len = libc::CMSG_LEN(std::mem::size_of_val(fds) as u32) as _;
         std::ptr::copy_nonoverlapping(
             fd_bytes.as_ptr(),
             libc::CMSG_DATA(cmsg),

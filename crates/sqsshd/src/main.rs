@@ -155,9 +155,16 @@ struct ServerState {
     /// Next session ID counter.
     next_session_id: std::sync::atomic::AtomicU64,
     /// Recovered sessions from sqssh-persist, waiting for clients to reconnect.
-    /// Keyed by (pubkey, username).
-    pending_sessions: Mutex<HashMap<([u8; 32], String), (RawFd, PersistedSession)>>,
+    pending_sessions: Mutex<HashMap<SessionKey, RecoveredSession>>,
 }
+
+/// How a reconnecting client is matched to a recovered session:
+/// its public key and the username it authenticated as.
+type SessionKey = ([u8; 32], String);
+
+/// A session recovered from sqssh-persist: the PTY master fd held open across
+/// the restart, and the state needed to resume it.
+type RecoveredSession = (RawFd, PersistedSession);
 
 /// Convert an Ed25519 pubkey to X25519 bytes for the squic whitelist.
 fn ed25519_to_x25519(ed_pub: &[u8; 32]) -> Option<[u8; 32]> {
@@ -268,7 +275,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Convert Ed25519 pubkeys to X25519 for squic whitelist
     let whitelist_keys: Vec<[u8; 32]> = ak_pubkeys
         .iter()
-        .filter_map(|ed_pub| ed25519_to_x25519(ed_pub))
+        .filter_map(ed25519_to_x25519)
         .collect();
 
     let addr: SocketAddr = format!("{}:{}", server_config.listen_address, server_config.port)
@@ -1133,6 +1140,7 @@ async fn handle_connection(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)] // four stream halves plus session config; worth a struct, but not in a lint pass
 async fn handle_raw_session_with_persist(
     data_send: quinn::SendStream,
     data_recv: quinn::RecvStream,

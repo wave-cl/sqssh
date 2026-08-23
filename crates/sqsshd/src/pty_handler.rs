@@ -222,6 +222,7 @@ pub struct SpawnedShell {
 }
 
 /// Spawn a shell and relay I/O using raw QUIC streams (no msgpack framing).
+#[allow(clippy::too_many_arguments)] // PTY session parameters; restructuring the shell path needs its own tests
 pub async fn run_raw_shell(
     mut data_send: quinn::SendStream,
     mut data_recv: quinn::RecvStream,
@@ -389,6 +390,7 @@ pub async fn run_raw_shell(
 }
 
 /// Resume a persisted PTY session using raw QUIC streams.
+#[allow(clippy::too_many_arguments)] // mirrors run_raw_shell
 pub async fn resume_raw_shell(
     mut data_send: quinn::SendStream,
     mut data_recv: quinn::RecvStream,

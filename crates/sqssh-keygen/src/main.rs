@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use sqssh_core::keys;
@@ -188,7 +188,7 @@ fn generate_key(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn show_fingerprint(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+fn show_fingerprint(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     // Try loading as public key first, then as private key
     let verifying_key = if let Ok((key, _)) = keys::load_public_key(path) {
         key
@@ -203,7 +203,7 @@ fn show_fingerprint(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn change_passphrase(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+fn change_passphrase(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     // Load key (prompts for old passphrase if encrypted)
     let signing_key = keys::load_private_key(path)?;
 

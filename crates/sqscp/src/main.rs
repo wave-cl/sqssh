@@ -411,6 +411,7 @@ async fn upload_file_raw(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)] // transfer parameters threaded from the CLI
 /// Upload a single file using multiple parallel uni streams (chunked).
 async fn upload_file_chunked(
     conn: &quinn::Connection,

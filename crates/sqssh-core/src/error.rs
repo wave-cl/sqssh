@@ -49,13 +49,11 @@ pub type Result<T> = std::result::Result<T, Error>;
 pub fn format_connection_error(err: &str) -> String {
     let msg = err.to_lowercase();
     if msg.contains("timed out") {
-        format!(
-            "connection timed out\n  \
+        "connection timed out\n  \
              - server may not be running (sqsshd)\n  \
              - host may be unreachable or firewalled\n  \
              - wrong port (default: 22/UDP)\n  \
-             - your key is not in the server's whitelist (silent drop)"
-        )
+             - your key is not in the server's whitelist (silent drop)".to_string()
     } else if msg.contains("connection refused") {
         "connection refused\n  \
          - no service listening on that port"
@@ -65,8 +63,8 @@ pub fn format_connection_error(err: &str) -> String {
          - no route to host — check your internet connection"
             .to_string()
     } else if msg.contains("dns") || msg.contains("resolve") {
-        format!("DNS resolution failed\n  \
-                 - hostname could not be resolved — check spelling")
+        "DNS resolution failed\n  \
+                 - hostname could not be resolved — check spelling".to_string()
     } else {
         err.to_string()
     }

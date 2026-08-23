@@ -1,6 +1,6 @@
 use std::io::Write;
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use sqssh_core::keys;
@@ -118,7 +118,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn add_key(path: &PathBuf, quiet: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn add_key(path: &Path, quiet: bool) -> Result<(), Box<dyn std::error::Error>> {
     let signing_key = keys::load_private_key(path)?;
     let verifying_key = signing_key.verifying_key();
     let pubkey_b58 = keys::encode_pubkey(&verifying_key);
@@ -226,7 +226,7 @@ fn list_public_keys() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn remove_key(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+fn remove_key(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let signing_key = keys::load_private_key(path)?;
     let pubkey = signing_key.verifying_key();
 

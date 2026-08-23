@@ -35,7 +35,7 @@ pub fn parse_remote(s: &str) -> Option<RemoteSpec> {
     };
 
     Some(RemoteSpec {
-        user: user.unwrap_or_else(|| whoami::username()),
+        user: user.unwrap_or_else(whoami::username),
         host,
         path,
     })
@@ -69,7 +69,7 @@ pub async fn connect(
     let username = user
         .map(String::from)
         .or(resolved.user.clone())
-        .unwrap_or_else(|| whoami::username());
+        .unwrap_or_else(whoami::username);
 
     // Resolve server public key
     let server_pubkey = if let Some(ref hk) = resolved.host_key {

@@ -140,7 +140,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let user = user
         .or(cli.login_name.clone())
         .or(resolved.user.clone())
-        .unwrap_or_else(|| whoami::username());
+        .unwrap_or_else(whoami::username);
 
     // Resolve server public key
     let server_pubkey = if let Some(ref hk) = resolved.host_key {
@@ -186,8 +186,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let conn = squic::dial(addr, server_pubkey.as_bytes(), squic_config)
         .await
         .map_err(|e| {
-            let hint = sqssh_core::error::format_connection_error(&e.to_string());
-            format!("{hint}")
+            sqssh_core::error::format_connection_error(&e.to_string())
         })?;
 
     // Authenticate on stream 0 (raw binary)
@@ -244,7 +243,7 @@ async fn reconnect_raw_shell(
     let user = user
         .or(cli.login_name.clone())
         .or(resolved.user.clone())
-        .unwrap_or_else(|| whoami::username());
+        .unwrap_or_else(whoami::username);
 
     let server_pubkey = if let Some(ref hk) = resolved.host_key {
         keys::decode_pubkey(hk)?
@@ -372,52 +371,49 @@ async fn run_raw_shell(
     }
     restore_terminal(&orig_termios);
 
-    match &result {
-        Err(e) => {
-            let msg = e.to_string();
+    if let Err(e) = &result {
+        let msg = e.to_string();
 
-            if msg.contains("server restarting") {
-                conn.close(quinn::VarInt::from_u32(0), b"reconnecting");
-                eprintln!("\r\nServer restarting. Reconnecting...");
-            } else if msg.contains("server shutting down")
-                || msg.contains("application close")
-            {
-                eprintln!("\r\nConnection closed by remote host.");
-                conn.close(quinn::VarInt::from_u32(0), b"");
-                std::process::exit(0);
-            } else if msg.contains("connection lost")
-                || msg.contains("stream finished")
-                || msg.contains("timed out")
-            {
-                eprintln!("\r\nConnection lost.");
-                conn.close(quinn::VarInt::from_u32(0), b"");
-                std::process::exit(1);
+        if msg.contains("server restarting") {
+            conn.close(quinn::VarInt::from_u32(0), b"reconnecting");
+            eprintln!("\r\nServer restarting. Reconnecting...");
+        } else if msg.contains("server shutting down")
+            || msg.contains("application close")
+        {
+            eprintln!("\r\nConnection closed by remote host.");
+            conn.close(quinn::VarInt::from_u32(0), b"");
+            std::process::exit(0);
+        } else if msg.contains("connection lost")
+            || msg.contains("stream finished")
+            || msg.contains("timed out")
+        {
+            eprintln!("\r\nConnection lost.");
+            conn.close(quinn::VarInt::from_u32(0), b"");
+            std::process::exit(1);
+        } else {
+            conn.close(quinn::VarInt::from_u32(0), b"");
+            eprintln!("\r\nsqssh: {msg}");
+            std::process::exit(1);
+        }
+
+        // Reconnect loop (only reached for "server restarting")
+        let mut attempt = 0u32;
+        loop {
+            let delay = if attempt == 0 {
+                Duration::from_millis(500)
             } else {
-                conn.close(quinn::VarInt::from_u32(0), b"");
-                eprintln!("\r\nsqssh: {msg}");
-                std::process::exit(1);
-            }
+                Duration::from_secs((1 << (attempt - 1).min(4)) as u64)
+            };
+            tokio::time::sleep(delay).await;
+            attempt += 1;
 
-            // Reconnect loop (only reached for "server restarting")
-            let mut attempt = 0u32;
-            loop {
-                let delay = if attempt == 0 {
-                    Duration::from_millis(500)
-                } else {
-                    Duration::from_secs((1 << (attempt - 1).min(4)) as u64)
-                };
-                tokio::time::sleep(delay).await;
-                attempt += 1;
-
-                match reconnect_raw_shell(&mut stdin_rx, cached_key).await {
-                    Ok(code) => std::process::exit(code),
-                    Err(_) => {
-                        eprint!(".");
-                    }
+            match reconnect_raw_shell(&mut stdin_rx, cached_key).await {
+                Ok(code) => std::process::exit(code),
+                Err(_) => {
+                    eprint!(".");
                 }
             }
         }
-        _ => {}
     }
 
     conn.close(quinn::VarInt::from_u32(0), b"client disconnect");
@@ -454,15 +450,10 @@ async fn run_remote_command(
                 && type_buf[0] == protocol::RAW_EXEC_STDERR
             {
                 let mut buf = vec![0u8; 8192];
-                loop {
-                    match uni_recv.read(&mut buf).await {
-                        Ok(Some(n)) => {
-                            let mut stderr = tokio::io::stderr();
-                            let _ = stderr.write_all(&buf[..n]).await;
-                            let _ = stderr.flush().await;
-                        }
-                        _ => break,
-                    }
+                while let Ok(Some(n)) = uni_recv.read(&mut buf).await {
+                    let mut stderr = tokio::io::stderr();
+                    let _ = stderr.write_all(&buf[..n]).await;
+                    let _ = stderr.flush().await;
                 }
             }
         }

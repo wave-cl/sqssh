@@ -57,6 +57,7 @@ pub async fn handle_raw_upload(
 }
 
 /// Write file data from a raw QUIC recv stream directly to disk.
+#[allow(clippy::too_many_arguments)] // file metadata threaded through the transfer path
 async fn write_file_from_stream(
     recv: &mut quinn::RecvStream,
     path: &Path,
@@ -217,6 +218,7 @@ async fn send_file_raw(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)] // chunk coordinates plus the file metadata they belong to
 /// Send a chunk of a file on a raw uni stream (server → client).
 async fn send_file_chunk_raw(
     conn: &quinn::Connection,
@@ -327,10 +329,14 @@ pub async fn handle_raw_upload_chunk(
         std::fs::create_dir_all(parent).ok();
     }
 
-    // Open file for writing at offset (create if not exists, don't truncate)
+    // Open for writing at an offset: create if absent, and explicitly do NOT
+    // truncate. Up to `jobs` chunk streams open this same file concurrently and
+    // pwrite at their own offsets, with set_len below doing the sizing, so a
+    // truncating open would discard whatever the other chunks had written.
     let file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
+        .truncate(false)
         .open(&target)?;
 
     // Pre-allocate as sparse file to avoid pwrite filling gaps with zeros

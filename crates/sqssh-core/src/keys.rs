@@ -174,7 +174,7 @@ fn encrypt_seed(seed: &[u8; 32], passphrase: &str) -> Result<String> {
 fn decrypt_seed(encrypted_b58: &str, passphrase: &str) -> Result<SigningKey> {
     let encoded = bs58::decode(encrypted_b58).into_vec()?;
     let blob = EncryptedKeyBlob::decode(&encoded)
-        .map_err(|e| Error::InvalidKeyFormat(e))?;
+        .map_err(Error::InvalidKeyFormat)?;
 
     if blob.salt.len() != 16 || blob.nonce.len() != 12 {
         return Err(Error::InvalidKeyFormat("invalid encrypted key blob".into()));
