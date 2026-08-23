@@ -1529,6 +1529,7 @@ dependencies = [
  "ed25519-dalek",
  "rand 0.8.5",
  "sqssh-core",
+ "tempfile",
  "whoami",
  "zeroize",
 ]
