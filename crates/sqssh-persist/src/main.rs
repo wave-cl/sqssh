@@ -17,6 +17,14 @@ const SOCKET_PATH: &str = "/var/run/sqssh/persist.sock";
 const TIMEOUT_SECS: u64 = 120; // exit if no recovery within 2 minutes
 
 fn main() {
+    // No clap here: this is an internal helper spawned by sqsshd and takes no
+    // arguments. --version exists only so a deploy can check what is installed
+    // without comparing checksums.
+    if std::env::args().nth(1).as_deref() == Some("--version") {
+        println!("sqssh-persist {}", env!("CARGO_PKG_VERSION"));
+        return;
+    }
+
     tracing_subscriber::fmt()
         .with_target(false)
         .init();

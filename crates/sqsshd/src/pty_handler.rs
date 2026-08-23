@@ -335,7 +335,15 @@ pub async fn run_raw_shell(
                         }
                     }
                     Ok(Err(e)) => {
-                        tracing::error!("PTY read error: {e}");
+                        // EIO is how a PTY master reports that the child has
+                        // exited and closed the slave — i.e. every clean
+                        // logout. Logging that at error level made ordinary
+                        // session ends look like faults and buried real ones.
+                        if e.raw_os_error() == Some(libc::EIO) {
+                            tracing::debug!("PTY closed, session ended");
+                        } else {
+                            tracing::error!("PTY read error: {e}");
+                        }
                         break;
                     }
                     Err(_would_block) => continue,
@@ -439,7 +447,15 @@ pub async fn resume_raw_shell(
                         }
                     }
                     Ok(Err(e)) => {
-                        tracing::error!("PTY read error: {e}");
+                        // EIO is how a PTY master reports that the child has
+                        // exited and closed the slave — i.e. every clean
+                        // logout. Logging that at error level made ordinary
+                        // session ends look like faults and buried real ones.
+                        if e.raw_os_error() == Some(libc::EIO) {
+                            tracing::debug!("PTY closed, session ended");
+                        } else {
+                            tracing::error!("PTY read error: {e}");
+                        }
                         break;
                     }
                     Err(_would_block) => continue,

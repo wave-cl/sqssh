@@ -87,7 +87,7 @@ enum AcceptResult {
 }
 
 #[derive(Parser)]
-#[command(name = "sqsshd", about = "sqssh server daemon")]
+#[command(name = "sqsshd", about = "sqssh server daemon", version)]
 struct Cli {
     /// Listen address
     #[arg(short = 'l', long)]
