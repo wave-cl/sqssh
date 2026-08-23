@@ -18,6 +18,54 @@ use tokio::sync::{watch, Mutex, RwLock};
 use tokio::task::JoinSet;
 use tracing::Instrument;
 
+/// How long a sync request will wait for the upload streams it was promised.
+const SYNC_WAIT_LIMIT: Duration = Duration::from_secs(120);
+
+/// Tracks how many client->server uni streams have finished, so a sync request
+/// can wait for a specific number of them.
+#[derive(Default)]
+struct UploadProgress {
+    completed: std::sync::atomic::AtomicU64,
+    notify: tokio::sync::Notify,
+}
+
+impl UploadProgress {
+    fn completed(&self) -> u64 {
+        self.completed.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Marks one stream finished when the returned guard drops, so the count
+    /// advances whether the handler returned, errored, or panicked.
+    fn stream_guard(self: &Arc<Self>) -> StreamGuard {
+        StreamGuard(self.clone())
+    }
+
+    /// Resolves once at least `target` streams have finished.
+    async fn wait_for(&self, target: u64) {
+        loop {
+            // Register before re-checking: notify_waiters() only wakes waiters
+            // already registered, so testing first would drop a wakeup landing
+            // in between and wait for one that never comes.
+            let notified = self.notify.notified();
+            if self.completed() >= target {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+struct StreamGuard(Arc<UploadProgress>);
+
+impl Drop for StreamGuard {
+    fn drop(&mut self) {
+        self.0
+            .completed
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        self.0.notify.notify_waiters();
+    }
+}
+
 mod file_handler;
 mod pty_handler;
 mod sftp_handler;
@@ -803,9 +851,12 @@ async fn handle_connection(
         .in_current_span(),
     );
 
-    // Track upload task handles so sync can wait for completion
-    let upload_handles: Arc<tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>> =
-        Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    // Count completed client->server uni streams so a sync request can wait for
+    // a specific number of them. Counting rather than holding join handles is
+    // deliberate: a stream the accept loop has not reached yet has no handle,
+    // so waiting on the handles we happen to hold can report success before the
+    // last chunk has landed.
+    let uploads_done = Arc::new(UploadProgress::default());
 
     // Handle channel requests (bidi) and raw file transfers (uni)
     loop {
@@ -870,21 +921,31 @@ async fn handle_connection(
                                         }
                                     }
                                     0xFE => {
-                                        // Sync request — client wants to know all prior uni streams are done.
-                                        // Read expected file count, wait for all upload tasks, then reply.
+                                        // Sync request — the client is asking whether every upload
+                                        // stream it opened has been received.
                                         let mut sync_send = send;
-                                        let upload_handles_clone = upload_handles.clone();
+                                        let progress = uploads_done.clone();
                                         tokio::spawn(async move {
-                                            // Read expected count
                                             let mut count_buf = [0u8; 4];
                                             let _ = recv.read_exact(&mut count_buf).await;
-                                            let _expected = u32::from_be_bytes(count_buf);
-                                            // Wait for all in-flight upload tasks
+                                            let expected = u64::from(u32::from_be_bytes(count_buf));
+
+                                            // Bounded, so a client that overstates the count cannot
+                                            // pin this task forever. On expiry answer anyway: the
+                                            // client would otherwise block until the connection dies,
+                                            // and a late reply is easier to diagnose than a hang.
+                                            if tokio::time::timeout(
+                                                SYNC_WAIT_LIMIT,
+                                                progress.wait_for(expected),
+                                            )
+                                            .await
+                                            .is_err()
                                             {
-                                                let mut handles = upload_handles_clone.lock().await;
-                                                for handle in handles.drain(..) {
-                                                    let _ = handle.await;
-                                                }
+                                                tracing::warn!(
+                                                    expected,
+                                                    completed = progress.completed(),
+                                                    "sync timed out waiting for upload streams"
+                                                );
                                             }
                                             let _ = sync_send.write_all(&[0xFE]).await;
                                             let _ = sync_send.finish();
@@ -914,7 +975,11 @@ async fn handle_connection(
         match accept_result {
             AcceptResult::Uni(mut recv) => {
                 let user = username.clone();
-                let handle = tokio::spawn(async move {
+                let progress = uploads_done.clone();
+                tokio::spawn(async move {
+                    // Counted however the stream ends, including on error, so a
+                    // failed upload cannot leave a sync waiting on it forever.
+                    let _guard = progress.stream_guard();
                     let mut type_buf = [0u8; 1];
                     if let Err(e) = recv.read_exact(&mut type_buf).await {
                         tracing::error!("failed to read uni stream type: {e}");
@@ -936,7 +1001,6 @@ async fn handle_connection(
                         }
                     }
                 }.in_current_span());
-                upload_handles.lock().await.push(handle);
                 continue;
             }
             AcceptResult::RawShell(data_send, data_recv, header) => {
@@ -1126,4 +1190,82 @@ async fn handle_raw_session_with_persist(
             });
         },
     ).await
+}
+
+#[cfg(test)]
+mod upload_progress_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn waiting_for_nothing_returns_at_once() {
+        let p = Arc::new(UploadProgress::default());
+        tokio::time::timeout(Duration::from_secs(1), p.wait_for(0))
+            .await
+            .expect("wait_for(0) should not block");
+    }
+
+    #[tokio::test]
+    async fn waits_until_every_stream_has_finished() {
+        let p = Arc::new(UploadProgress::default());
+        let guards: Vec<_> = (0..3).map(|_| p.stream_guard()).collect();
+
+        let waiter = {
+            let p = p.clone();
+            tokio::spawn(async move { p.wait_for(3).await })
+        };
+
+        // Two of three is not enough to release the waiter.
+        let mut guards = guards;
+        drop(guards.pop());
+        drop(guards.pop());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!waiter.is_finished(), "released before the last stream ended");
+
+        drop(guards.pop());
+        tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .expect("waiter should be released once the last stream ends")
+            .unwrap();
+    }
+
+    /// The count has to advance even when a handler fails, or one bad upload
+    /// would leave the client's sync hanging until the timeout.
+    #[tokio::test]
+    async fn a_failed_stream_still_counts() {
+        let p = Arc::new(UploadProgress::default());
+        let guard = p.stream_guard();
+        let task = tokio::spawn(async move {
+            let _g = guard;
+            Err::<(), &str>("upload blew up")
+        });
+        let _ = task.await;
+        assert_eq!(p.completed(), 1);
+    }
+
+    /// A guard dropped concurrently with the waiter still releases it.
+    ///
+    /// Note this does **not** prove the register-before-check ordering in
+    /// wait_for. Inverting that ordering still passes here: the window between
+    /// reading the count and registering with Notify is a few instructions
+    /// wide, and 2000 rounds on four threads never landed in it. The ordering
+    /// is kept because it is the correct Notify pattern, not because this
+    /// covers it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_concurrent_completion_still_releases_the_waiter() {
+        for _ in 0..2000 {
+            let p = Arc::new(UploadProgress::default());
+            let guard = p.stream_guard();
+            let waiter = {
+                let p = p.clone();
+                tokio::spawn(async move { p.wait_for(1).await })
+            };
+            let dropper = tokio::spawn(async move { drop(guard) });
+            tokio::time::timeout(Duration::from_secs(2), waiter)
+                .await
+                .expect("waiter missed a wakeup that landed mid-check")
+                .unwrap();
+            dropper.await.unwrap();
+        }
+    }
 }

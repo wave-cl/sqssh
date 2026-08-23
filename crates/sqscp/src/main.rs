@@ -232,6 +232,10 @@ async fn upload(
 
     // Single file with j > 1: use chunked parallel upload
     let is_dir_dest = remote_path.ends_with('/') || remote_path == "~" || remote_path == ".";
+    // How many uni streams this upload will open, which is what the sync
+    // request below has to report: one per job when chunking a single file,
+    // otherwise one per file.
+    let uni_streams_opened = if files_total == 1 && jobs > 1 { jobs } else { files_total };
     if files_total == 1 && jobs > 1 {
         let (local_path, rel_name) = files.into_iter().next().unwrap();
         let upload_path = if is_dir_dest {
@@ -278,15 +282,20 @@ async fn upload(
     }
 
     // Wait for all streams to be fully received by the server.
-    // Send the number of files we uploaded in the sync request so the server
-    // can wait until it has received all uni streams before replying.
+    //
+    // The count is of uni *streams*, not files. A chunked single-file upload
+    // opens one stream per job, so sending the file count told the server to
+    // wait for one stream out of eight and it could answer before the rest had
+    // landed. Old servers ignore the field entirely, and an old client talking
+    // to a new server understates it, which is no worse than the behaviour it
+    // replaces — so both directions degrade to what they did before.
     let (mut sync_send, mut sync_recv) = conn
         .open_bi()
         .await
         .map_err(|e| format!("sync stream: {e}"))?;
-    let file_count = files_total as u32;
+    let stream_count = uni_streams_opened as u32;
     let mut sync_msg = vec![0xFE];
-    sync_msg.extend_from_slice(&file_count.to_be_bytes());
+    sync_msg.extend_from_slice(&stream_count.to_be_bytes());
     sync_send.write_all(&sync_msg).await.map_err(|e| format!("sync write: {e}"))?;
     sync_send.finish().map_err(|e| format!("sync finish: {e}"))?;
     let mut buf = [0u8; 1];
