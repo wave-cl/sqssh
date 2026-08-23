@@ -152,7 +152,7 @@ fn get_and_update_lastlog(uid: u32, remote_host: &str) -> Option<String> {
                         libc::strftime(
                             buf.as_mut_ptr() as *mut libc::c_char,
                             buf.len(),
-                            b"%a %b %e %H:%M:%S %Y\0".as_ptr() as *const libc::c_char,
+                            c"%a %b %e %H:%M:%S %Y".as_ptr(),
                             tm,
                         )
                     };

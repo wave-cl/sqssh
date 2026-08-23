@@ -396,7 +396,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Send SIGHUP to all child shell processes so they exit
     {
         let sessions = state.pty_sessions.lock().await;
-        for (_, session) in sessions.iter() {
+        for session in sessions.values() {
             unsafe { libc::kill(session.info.child_pid as i32, libc::SIGHUP); }
         }
     }
@@ -640,7 +640,7 @@ async fn persist_sessions(state: &ServerState) {
     let mut fds = Vec::new();
     let mut payload_sessions = Vec::new();
 
-    for (_id, session) in sessions.iter() {
+    for session in sessions.values() {
         fds.push(session.master_fd);
         payload_sessions.push(session.info.clone());
     }
