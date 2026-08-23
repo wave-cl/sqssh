@@ -277,17 +277,6 @@ async fn upload(
         }
     }
 
-    if !cli.quiet {
-        let elapsed = progress.start.elapsed().as_secs_f64();
-        let transferred = progress.transferred_bytes.load(Ordering::Relaxed);
-        eprintln!(
-            "{} transferred in {:.1}s ({}/s)",
-            format_bytes(transferred),
-            elapsed,
-            format_bytes((transferred as f64 / elapsed) as u64),
-        );
-    }
-
     // Wait for all streams to be fully received by the server.
     // Send the number of files we uploaded in the sync request so the server
     // can wait until it has received all uni streams before replying.
@@ -302,6 +291,31 @@ async fn upload(
     sync_send.finish().map_err(|e| format!("sync finish: {e}"))?;
     let mut buf = [0u8; 1];
     let _ = sync_recv.read_exact(&mut buf).await; // wait for server ack
+
+    // Report only once the server has confirmed it has everything.
+    //
+    // quinn's SendStream::finish() returns as soon as the stream is marked
+    // finished — it does not wait for the peer to acknowledge the bytes. So
+    // when the chunk tasks above complete, the data is sitting in quinn's send
+    // buffers, not on the wire. Timing to that point measured how fast we
+    // filled a buffer: a 3 MB upload that took 67 seconds of wall clock
+    // reported "3.0MB transferred in 0.0s (1013.4MB/s)". The sync round trip
+    // is the first moment the transfer is genuinely done.
+    if !cli.quiet {
+        let elapsed = progress.start.elapsed().as_secs_f64();
+        let transferred = progress.transferred_bytes.load(Ordering::Relaxed);
+        let rate = if elapsed > 0.0 {
+            (transferred as f64 / elapsed) as u64
+        } else {
+            0
+        };
+        eprintln!(
+            "{} transferred in {:.1}s ({}/s)",
+            format_bytes(transferred),
+            elapsed,
+            format_bytes(rate),
+        );
+    }
 
     if errors > 0 {
         Err(format!("{errors} file(s) failed").into())
