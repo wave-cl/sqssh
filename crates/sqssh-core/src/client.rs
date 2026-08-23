@@ -18,15 +18,12 @@ pub struct RemoteSpec {
 
 /// Parse a destination string like "user@host:/path" or "user@host" or "host:/path".
 pub fn parse_remote(s: &str) -> Option<RemoteSpec> {
-    // Must contain ':' for a path, or '@' for user
-    let (userhost, path) = if let Some(colon) = s.find(':') {
-        let path = &s[colon + 1..];
-        let userhost = &s[..colon];
-        (userhost, if path.is_empty() { None } else { Some(path.to_string()) })
-    } else {
-        // No colon — could be user@host (no path) for sqssh, but not a remote spec for sqscp
-        return None;
-    };
+    // No colon — could be user@host (no path) for sqssh, but not a remote spec
+    // for sqscp, so this is not a destination we can parse.
+    let colon = s.find(':')?;
+    let userhost = &s[..colon];
+    let path = &s[colon + 1..];
+    let path = if path.is_empty() { None } else { Some(path.to_string()) };
 
     let (user, host) = if let Some(at) = userhost.find('@') {
         (Some(userhost[..at].to_string()), userhost[at + 1..].to_string())
