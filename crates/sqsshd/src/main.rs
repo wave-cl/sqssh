@@ -354,13 +354,20 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     None => break,
                 };
 
+                // The peer's X25519 key, proven by MAC1 while the Initial was
+                // validated. Captured here because peer_key() drains it and
+                // handle_connection consumes `incoming`. None only for a
+                // connection the transport did not verify, which the binding
+                // check below then refuses.
+                let peer_x25519 = state.listener.peer_key(&incoming);
+
                 let state = state.clone();
                 tasks.spawn(async move {
                     // Determine remote address for span (from Incoming metadata)
                     let remote = incoming.remote_address();
                     let span = tracing::info_span!("conn", remote = %remote);
                     async {
-                        if let Err(e) = handle_connection(incoming, state.clone()).await {
+                        if let Err(e) = handle_connection(incoming, peer_x25519, state.clone()).await {
                             tracing::error!("connection error: {e}");
                         }
                     }
@@ -737,6 +744,7 @@ async fn recover_persisted_sessions(state: &ServerState) {
 
 async fn handle_connection(
     incoming: quinn::Incoming,
+    peer_x25519: Option<[u8; 32]>,
     state: Arc<ServerState>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let conn = incoming.await?;
@@ -793,13 +801,33 @@ async fn handle_connection(
             continue;
         }
 
+        // The auth request carries an Ed25519 key the client merely asserts.
+        // Bind it to the identity the transport actually proved: convert the
+        // claimed key forward and require it to equal the MAC1-verified X25519
+        // key of this connection. Without this a caller that passed MAC1 with
+        // one authorised key could claim any other, impersonating its owner.
+        // Fail closed if the transport key is absent — a connection we could
+        // not verify has no business naming a user.
+        let binding_ok = match peer_x25519 {
+            Some(transport_key) => ed25519_to_x25519(&pubkey_bytes) == Some(transport_key),
+            None => false,
+        };
+
         // Validate auth based on mode
         let authorized = match state.auth_mode {
             AuthMode::WhitelistAndUser | AuthMode::OpenAndUser => {
-                let vk = VerifyingKey::from_bytes(&pubkey_bytes)
-                    .map_err(|_| "invalid ed25519 pubkey")?;
-                let ak = state.authorized_keys.read().await;
-                ak.is_authorized(&vk, &username)
+                if !binding_ok {
+                    tracing::warn!(
+                        user = %username,
+                        "claimed key is not the connection's transport key — rejecting"
+                    );
+                    false
+                } else {
+                    let vk = VerifyingKey::from_bytes(&pubkey_bytes)
+                        .map_err(|_| "invalid ed25519 pubkey")?;
+                    let ak = state.authorized_keys.read().await;
+                    ak.is_authorized(&vk, &username)
+                }
             }
             AuthMode::WhitelistOnly => true,
         };
