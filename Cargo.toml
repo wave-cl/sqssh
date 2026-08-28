@@ -16,7 +16,7 @@ members = [
 ]
 
 [workspace.dependencies]
-squic = { git = "https://github.com/wave-cl/squic-rust", tag = "v0.16.0" }
+squic = { git = "https://github.com/wave-cl/squic-rust", tag = "v0.17.0" }
 sqssh-core = { path = "crates/sqssh-core" }
 tokio = { version = "1", features = ["full"] }
 clap = { version = "4", features = ["derive"] }
