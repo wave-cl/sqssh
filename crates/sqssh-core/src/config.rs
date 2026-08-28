@@ -23,6 +23,10 @@ pub struct HostConfig {
     pub keepalive_interval: Option<u64>,
     pub strict_host_key_checking: Option<StrictHostKeyChecking>,
     pub connection_migration: Option<bool>,
+    /// SIP-29: the sQUIC envelope version to emit. Defaults to 1, which every
+    /// server understands. Set it to 2 only against servers known to accept it
+    /// — a server that does not will drop the Initial in silence.
+    pub envelope_version: Option<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -58,6 +62,7 @@ impl Default for HostConfig {
             keepalive_interval: None,
             strict_host_key_checking: None,
             connection_migration: None,
+            envelope_version: None,
         }
     }
 }
@@ -152,6 +157,7 @@ pub struct ResolvedConfig {
     pub keepalive_interval: u64,
     pub strict_host_key_checking: StrictHostKeyChecking,
     pub connection_migration: bool,
+    pub envelope_version: u8,
 }
 
 impl ResolvedConfig {
@@ -173,6 +179,7 @@ impl ResolvedConfig {
                 .strict_host_key_checking
                 .unwrap_or(StrictHostKeyChecking::Yes),
             connection_migration: defaults.connection_migration.unwrap_or(true),
+            envelope_version: defaults.envelope_version.unwrap_or(1),
         }
     }
 
@@ -208,6 +215,9 @@ impl ResolvedConfig {
         if let Some(v) = host.connection_migration {
             self.connection_migration = v;
         }
+        if let Some(v) = host.envelope_version {
+            self.envelope_version = v;
+        }
     }
 }
 
@@ -236,6 +246,16 @@ fn apply_directive(target: &mut HostConfig, key: &str, value: &str) -> Result<()
         "user" => target.user = Some(value.to_string()),
         "identityfile" => target.identity_file = Some(value.to_string()),
         "hostkey" => target.host_key = Some(value.to_string()),
+        "envelopeversion" => {
+            let v: u8 = value
+                .parse()
+                .map_err(|_| Error::Config(format!("invalid envelope version: {value}")))?;
+            if v == 0 {
+                // SIP-29 reserves version 0 and forbids emitting it.
+                return Err(Error::Config("envelope version 0 is reserved".into()));
+            }
+            target.envelope_version = Some(v);
+        }
         "proxyjump" => target.proxy_jump = Some(value.to_string()),
         "connecttimeout" => {
             target.connect_timeout = Some(
@@ -480,6 +500,29 @@ mod tests {
         assert_eq!(config.hosts.len(), 2);
         assert_eq!(config.hosts[0].pattern, "dev");
         assert_eq!(config.hosts[0].hostname.as_deref(), Some("dev.example.com"));
+    }
+
+    /// SIP-29: a client emits one envelope version, and defaults to 1 because
+    /// every server understands it. Selecting 2 is opt-in per host, since a
+    /// server that does not accept it drops the Initial in silence.
+    #[test]
+    fn envelope_version_defaults_to_one_and_is_per_host() {
+        let cfg = ClientConfig::parse(
+            "Host new\n    EnvelopeVersion 2\n\nHost old\n    Port 2222\n",
+        )
+        .expect("parses");
+
+        assert_eq!(cfg.resolve("new").envelope_version, 2);
+        assert_eq!(cfg.resolve("old").envelope_version, 1, "default is not 1");
+        assert_eq!(cfg.resolve("unmentioned").envelope_version, 1);
+    }
+
+    /// Version 0 is reserved by SIP-29 and must never be emitted, so it is
+    /// refused at the point somebody could write it down.
+    #[test]
+    fn envelope_version_zero_is_refused() {
+        assert!(ClientConfig::parse("Host h\n    EnvelopeVersion 0\n").is_err());
+        assert!(ClientConfig::parse("Host h\n    EnvelopeVersion nonsense\n").is_err());
     }
 
     #[test]

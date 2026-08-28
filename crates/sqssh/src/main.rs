@@ -180,6 +180,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         keep_alive: Some(std::time::Duration::from_secs(resolved.keepalive_interval)),
         client_key: Some(client_key_hex),
         handshake_timeout: Some(std::time::Duration::from_secs(resolved.connect_timeout)),
+        envelope_version: resolved.envelope_version,
         ..Default::default()
     };
 
@@ -272,6 +273,7 @@ async fn reconnect_raw_shell(
         keep_alive: Some(Duration::from_secs(resolved.keepalive_interval)),
         client_key: Some(client_key_hex),
         handshake_timeout: Some(Duration::from_millis(1500)),
+        envelope_version: resolved.envelope_version,
         ..Default::default()
     };
 
