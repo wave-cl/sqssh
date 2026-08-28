@@ -25,3 +25,11 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
+
+      # Nothing in the unit tests opens a connection, so they pass whether or
+      # not sqssh and sqsshd can talk. This drives the real binaries: one case
+      # proves a handshake completes, the other proves an empty whitelist still
+      # drops silently. See the header of the script for why the second is what
+      # makes the first mean anything.
+      - name: Transport smoke test
+        run: bash scripts/transport_smoke.sh
