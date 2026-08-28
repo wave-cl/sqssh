@@ -157,7 +157,11 @@ pub struct ResolvedConfig {
     pub keepalive_interval: u64,
     pub strict_host_key_checking: StrictHostKeyChecking,
     pub connection_migration: bool,
-    pub envelope_version: u8,
+    /// `None` means the caller said nothing, so squic's own default applies.
+    /// It must NOT be resolved to a number here: pinning one silently
+    /// overrides squic's default, which is how a v0.4.0 client kept emitting
+    /// version 1 after squic moved its default to version 2.
+    pub envelope_version: Option<u8>,
 }
 
 impl ResolvedConfig {
@@ -179,7 +183,7 @@ impl ResolvedConfig {
                 .strict_host_key_checking
                 .unwrap_or(StrictHostKeyChecking::Yes),
             connection_migration: defaults.connection_migration.unwrap_or(true),
-            envelope_version: defaults.envelope_version.unwrap_or(1),
+            envelope_version: defaults.envelope_version,
         }
     }
 
@@ -215,8 +219,8 @@ impl ResolvedConfig {
         if let Some(v) = host.connection_migration {
             self.connection_migration = v;
         }
-        if let Some(v) = host.envelope_version {
-            self.envelope_version = v;
+        if host.envelope_version.is_some() {
+            self.envelope_version = host.envelope_version;
         }
     }
 }
@@ -353,11 +357,13 @@ pub struct ServerConfig {
     pub max_sessions: usize,
     pub control_socket: PathBuf,
     pub connection_migration: bool,
-    /// SIP-29: the sQUIC envelope versions this server parses. Defaults to
-    /// both. Narrowing it to just `[2]` retires version 1 — which a deployment
-    /// must be able to do, or the oldest envelope ever defined becomes a
-    /// permanent floor.
-    pub accepted_envelope_versions: Vec<u8>,
+    /// SIP-29: the sQUIC envelope versions this server parses. `None` means
+    /// the config said nothing, so squic's own default applies — pinning a
+    /// list here would silently override it, the same defect that kept clients
+    /// on version 1 after squic moved its default. Narrowing it to `[2]`
+    /// retires version 1, which a deployment must be able to do or the oldest
+    /// envelope ever defined becomes a permanent floor.
+    pub accepted_envelope_versions: Option<Vec<u8>>,
     pub allow_users: Vec<String>,
     pub deny_users: Vec<String>,
     pub print_motd: bool,
@@ -377,7 +383,7 @@ impl Default for ServerConfig {
             max_sessions: 64,
             control_socket: PathBuf::from("/var/run/sqssh/control.sock"),
             connection_migration: true,
-            accepted_envelope_versions: vec![1, 2],
+            accepted_envelope_versions: None,
             allow_users: Vec::new(),
             deny_users: Vec::new(),
             print_motd: true,
@@ -445,7 +451,7 @@ impl ServerConfig {
                             "AcceptedEnvelopeVersions needs at least one version".into(),
                         ));
                     }
-                    config.accepted_envelope_versions = versions;
+                    config.accepted_envelope_versions = Some(versions);
                 }
                 "authorizedkeysfile" => config.authorized_keys_file = value.to_string(),
                 "maxsessions" => {
@@ -537,9 +543,13 @@ mod tests {
         )
         .expect("parses");
 
-        assert_eq!(cfg.resolve("new").envelope_version, 2);
-        assert_eq!(cfg.resolve("old").envelope_version, 1, "default is not 1");
-        assert_eq!(cfg.resolve("unmentioned").envelope_version, 1);
+        assert_eq!(cfg.resolve("new").envelope_version, Some(2));
+        // Unset must stay unset. Resolving it to a number here would pin a
+        // version on top of squic's own default and silently override it —
+        // which is exactly how a client kept emitting version 1 after squic
+        // moved its default to version 2.
+        assert_eq!(cfg.resolve("old").envelope_version, None);
+        assert_eq!(cfg.resolve("unmentioned").envelope_version, None);
     }
 
     /// Version 0 is reserved by SIP-29 and must never be emitted, so it is

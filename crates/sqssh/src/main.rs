@@ -180,10 +180,13 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         keep_alive: Some(std::time::Duration::from_secs(resolved.keepalive_interval)),
         client_key: Some(client_key_hex),
         handshake_timeout: Some(std::time::Duration::from_secs(resolved.connect_timeout)),
-        envelope_version: resolved.envelope_version,
         ..Default::default()
     };
 
+    let mut squic_config = squic_config;
+    if let Some(v) = resolved.envelope_version {
+        squic_config.envelope_version = v;
+    }
     let conn = squic::dial(addr, server_pubkey.as_bytes(), squic_config)
         .await
         .map_err(|e| {
@@ -273,10 +276,13 @@ async fn reconnect_raw_shell(
         keep_alive: Some(Duration::from_secs(resolved.keepalive_interval)),
         client_key: Some(client_key_hex),
         handshake_timeout: Some(Duration::from_millis(1500)),
-        envelope_version: resolved.envelope_version,
         ..Default::default()
     };
 
+    let mut squic_config = squic_config;
+    if let Some(v) = resolved.envelope_version {
+        squic_config.envelope_version = v;
+    }
     let conn = squic::dial(addr, server_pubkey.as_bytes(), squic_config).await?;
 
     let (mut auth_send, mut auth_recv) = conn.open_bi().await?;

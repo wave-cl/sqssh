@@ -134,9 +134,15 @@ pub async fn connect(
         keep_alive: Some(std::time::Duration::from_secs(resolved.keepalive_interval)),
         client_key: Some(client_key_hex),
         handshake_timeout: Some(std::time::Duration::from_secs(resolved.connect_timeout)),
-        envelope_version: resolved.envelope_version,
         ..Default::default()
     };
+
+    // Only override squic's own default when the config actually named a
+    // version; see ResolvedConfig::envelope_version.
+    let mut squic_config = squic_config;
+    if let Some(v) = resolved.envelope_version {
+        squic_config.envelope_version = v;
+    }
 
     let conn = squic::dial(addr, server_pubkey.as_bytes(), squic_config)
         .await

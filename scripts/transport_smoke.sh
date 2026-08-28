@@ -43,13 +43,14 @@ BIN="$(cargo metadata --format-version 1 --no-deps -q 2>/dev/null \
 
 pass=0; fail=0
 
-# $1 = case label  $2 = auth mode  $3 = expected marker in the client's output
+# $1 = case label  $2 = auth mode  $3 = expected marker  $4 = extra server config
 run() {
   local port=$((30000 + RANDOM % 20000))
   cat > "$WORK/sqsshd.conf" <<CONF
 ListenAddress 127.0.0.1
 Port $port
 AuthMode $2
+${4:-}
 CONF
   local pub
   pub=$("$BIN/sqsshd" -c "$WORK/sqsshd.conf" -k "$WORK/host_key" --show-pubkey 2>/dev/null | tail -1)
@@ -98,5 +99,15 @@ CONF
 echo "=== sqssh transport smoke test ==="
 run "handshake completes"   "open+user"      "authentication failed"
 run "empty whitelist drops" "whitelist+user" "connection timed out"
+
+# SIP-29. A server that has retired envelope version 1 must still be reachable
+# by a *default* client, because the default is the version squic emits and
+# squic emits version 2. This case exists because it once did not: sqssh's own
+# config layer resolved an unset EnvelopeVersion to 1, pinning version 1 on top
+# of squic's default, and every default client was locked out of a server that
+# had retired it. Nothing else here would have noticed — both cases above pass
+# whichever version the client sends, because both servers accept both.
+run "default client reaches a v2-only server" "open+user" "authentication failed" \
+  "AcceptedEnvelopeVersions 2"
 echo "=== pass=$pass fail=$fail ==="
 exit "$fail"
