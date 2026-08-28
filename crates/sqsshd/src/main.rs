@@ -290,6 +290,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             None
         },
         disable_active_migration: !server_config.connection_migration,
+        accepted_envelope_versions: server_config.accepted_envelope_versions.clone(),
         ..Default::default()
     };
 

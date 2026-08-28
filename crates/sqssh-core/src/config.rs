@@ -353,6 +353,11 @@ pub struct ServerConfig {
     pub max_sessions: usize,
     pub control_socket: PathBuf,
     pub connection_migration: bool,
+    /// SIP-29: the sQUIC envelope versions this server parses. Defaults to
+    /// both. Narrowing it to just `[2]` retires version 1 — which a deployment
+    /// must be able to do, or the oldest envelope ever defined becomes a
+    /// permanent floor.
+    pub accepted_envelope_versions: Vec<u8>,
     pub allow_users: Vec<String>,
     pub deny_users: Vec<String>,
     pub print_motd: bool,
@@ -372,6 +377,7 @@ impl Default for ServerConfig {
             max_sessions: 64,
             control_socket: PathBuf::from("/var/run/sqssh/control.sock"),
             connection_migration: true,
+            accepted_envelope_versions: vec![1, 2],
             allow_users: Vec::new(),
             deny_users: Vec::new(),
             print_motd: true,
@@ -421,6 +427,25 @@ impl ServerConfig {
                             return Err(Error::Config(format!("invalid auth mode: {value}")));
                         }
                     };
+                }
+                "acceptedenvelopeversions" => {
+                    let mut versions = Vec::new();
+                    for part in value.split(',') {
+                        let v: u8 = part.trim().parse().map_err(|_| {
+                            Error::Config(format!("invalid envelope version: {part}"))
+                        })?;
+                        if v == 0 {
+                            // SIP-29 reserves version 0 and forbids emitting it.
+                            return Err(Error::Config("envelope version 0 is reserved".into()));
+                        }
+                        versions.push(v);
+                    }
+                    if versions.is_empty() {
+                        return Err(Error::Config(
+                            "AcceptedEnvelopeVersions needs at least one version".into(),
+                        ));
+                    }
+                    config.accepted_envelope_versions = versions;
                 }
                 "authorizedkeysfile" => config.authorized_keys_file = value.to_string(),
                 "maxsessions" => {

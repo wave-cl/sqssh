@@ -97,3 +97,25 @@ fn test_server_config_parse() {
     assert_eq!(config.allow_users, vec!["root", "admin"]);
     assert!(!config.print_motd);
 }
+
+/// SIP-29 requires that a server be able to refuse envelope version 1, or the
+/// oldest envelope ever defined becomes a permanent floor. The default is both,
+/// because retiring a version is a deployment's own decision.
+#[test]
+fn accepted_envelope_versions_default_to_both_and_can_be_narrowed() {
+    use sqssh_core::config::ServerConfig;
+
+    let both = ServerConfig::parse("Port 22\n").unwrap();
+    assert_eq!(both.accepted_envelope_versions, vec![1, 2]);
+
+    let retired = ServerConfig::parse("AcceptedEnvelopeVersions 2\n").unwrap();
+    assert_eq!(retired.accepted_envelope_versions, vec![2]);
+
+    let listed = ServerConfig::parse("AcceptedEnvelopeVersions 1, 2\n").unwrap();
+    assert_eq!(listed.accepted_envelope_versions, vec![1, 2]);
+
+    // Version 0 is reserved by SIP-29, and a set that parses to nothing would
+    // silently block every caller.
+    assert!(ServerConfig::parse("AcceptedEnvelopeVersions 0\n").is_err());
+    assert!(ServerConfig::parse("AcceptedEnvelopeVersions x\n").is_err());
+}
