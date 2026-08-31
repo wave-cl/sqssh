@@ -23,9 +23,17 @@ pub struct HostConfig {
     pub keepalive_interval: Option<u64>,
     pub strict_host_key_checking: Option<StrictHostKeyChecking>,
     pub connection_migration: Option<bool>,
-    /// SIP-29: the sQUIC envelope version to emit. Defaults to 1, which every
-    /// server understands. Set it to 2 only against servers known to accept it
-    /// — a server that does not will drop the Initial in silence.
+    /// SIP-29: the sQUIC envelope version to emit.
+    ///
+    /// Unset means squic's own default, which is version 3 as of squic
+    /// v0.20.0 — the version carrying MAC0 (SIP-37). Set it *down*, to 2 or 1,
+    /// for a server too old to accept that: a server that does not recognise
+    /// the version drops the Initial in silence, so the symptom of aiming too
+    /// high is a handshake timeout with no diagnostic.
+    ///
+    /// Unset stays `None` rather than resolving to a number here, so squic's
+    /// default is never silently pinned over. That mistake is how a client kept
+    /// emitting version 1 after squic had moved on.
     pub envelope_version: Option<u8>,
 }
 
@@ -533,11 +541,15 @@ mod tests {
         assert_eq!(config.hosts[0].hostname.as_deref(), Some("dev.example.com"));
     }
 
-    /// SIP-29: a client emits one envelope version, and defaults to 1 because
-    /// every server understands it. Selecting 2 is opt-in per host, since a
-    /// server that does not accept it drops the Initial in silence.
+    /// SIP-29: a client emits one envelope version, and choosing it is per
+    /// host — a deployment may run servers of different vintages, and a server
+    /// that does not accept the version drops the Initial in silence.
+    ///
+    /// Unset is the interesting case, and the reason this test exists: it must
+    /// stay unset so squic's own default applies, whatever that default has
+    /// become.
     #[test]
-    fn envelope_version_defaults_to_one_and_is_per_host() {
+    fn envelope_version_is_unset_by_default_and_is_per_host() {
         let cfg = ClientConfig::parse(
             "Host new\n    EnvelopeVersion 2\n\nHost old\n    Port 2222\n",
         )
@@ -547,7 +559,8 @@ mod tests {
         // Unset must stay unset. Resolving it to a number here would pin a
         // version on top of squic's own default and silently override it —
         // which is exactly how a client kept emitting version 1 after squic
-        // moved its default to version 2.
+        // moved its default to version 2, and would now strand it on 2 after
+        // squic moved to 3.
         assert_eq!(cfg.resolve("old").envelope_version, None);
         assert_eq!(cfg.resolve("unmentioned").envelope_version, None);
     }

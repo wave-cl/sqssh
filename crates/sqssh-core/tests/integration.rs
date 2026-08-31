@@ -98,11 +98,13 @@ fn test_server_config_parse() {
     assert!(!config.print_motd);
 }
 
-/// SIP-29 requires that a server be able to refuse envelope version 1, or the
-/// oldest envelope ever defined becomes a permanent floor. The default is both,
-/// because retiring a version is a deployment's own decision.
+/// SIP-29 requires that a server be able to refuse an old envelope version, or
+/// the oldest one ever defined becomes a permanent floor. Unset leaves squic's
+/// own default — every version it knows — because retiring one is a
+/// deployment's own decision, and it is the decision that finally makes the
+/// cookie stage silent (SIP-37: MAC0 exists only on version 3).
 #[test]
-fn accepted_envelope_versions_default_to_both_and_can_be_narrowed() {
+fn accepted_envelope_versions_are_unset_by_default_and_can_be_narrowed() {
     use sqssh_core::config::ServerConfig;
 
     // Unset must stay unset, so squic's own default applies. Pinning a list
