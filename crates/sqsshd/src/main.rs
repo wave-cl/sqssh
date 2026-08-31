@@ -294,9 +294,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     };
 
     let mut squic_config = squic_config;
-    if let Some(v) = &server_config.accepted_envelope_versions {
-        squic_config.accepted_envelope_versions = v.clone();
-    }
+    sqssh_core::config::apply_accepted_envelope_versions(&mut squic_config, &server_config);
 
     let listener = squic::listen(addr, &signing_key, squic_config).await?;
     let local_addr = listener.local_addr()?;

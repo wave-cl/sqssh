@@ -140,9 +140,7 @@ pub async fn connect(
     // Only override squic's own default when the config actually named a
     // version; see ResolvedConfig::envelope_version.
     let mut squic_config = squic_config;
-    if let Some(v) = resolved.envelope_version {
-        squic_config.envelope_version = v;
-    }
+    crate::config::apply_client_envelope_version(&mut squic_config, &resolved);
 
     let conn = squic::dial(addr, server_pubkey.as_bytes(), squic_config)
         .await

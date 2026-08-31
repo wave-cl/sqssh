@@ -511,6 +511,35 @@ impl ServerConfig {
     }
 }
 
+
+/// Apply a resolved host's SIP-29 envelope version to a squic client config.
+///
+/// Only when the config actually named one. Leaving it alone otherwise is the
+/// whole point: resolving an unset directive to a number here would pin a
+/// version on top of squic's own default and silently override it, which is
+/// how a client kept emitting version 1 after squic had moved to version 2 —
+/// and would strand it on 2 now that squic emits 3.
+///
+/// Shared with the client so a test exercises the mapping the client actually
+/// uses, rather than a copy of it that can agree with a broken original.
+pub fn apply_client_envelope_version(cfg: &mut squic::Config, resolved: &ResolvedConfig) {
+    if let Some(v) = resolved.envelope_version {
+        cfg.envelope_version = v;
+    }
+}
+
+/// Apply a server config's accepted SIP-29 envelope versions to a squic server
+/// config, for the same reason and with the same caveat as the client side.
+///
+/// Unset leaves squic's own default — every version it knows. Narrowing the set
+/// is a deployment's own decision, and it is the decision that finally makes
+/// the cookie stage silent, since MAC0 exists only on version 3 (SIP-37).
+pub fn apply_accepted_envelope_versions(cfg: &mut squic::Config, server: &ServerConfig) {
+    if let Some(v) = &server.accepted_envelope_versions {
+        cfg.accepted_envelope_versions = v.clone();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
