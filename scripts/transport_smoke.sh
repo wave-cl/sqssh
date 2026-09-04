@@ -100,14 +100,20 @@ echo "=== sqssh transport smoke test ==="
 run "handshake completes"   "open+user"      "authentication failed"
 run "empty whitelist drops" "whitelist+user" "connection timed out"
 
-# SIP-29. A server that has retired envelope version 1 must still be reachable
-# by a *default* client, because the default is the version squic emits and
-# squic emits version 2. This case exists because it once did not: sqssh's own
-# config layer resolved an unset EnvelopeVersion to 1, pinning version 1 on top
-# of squic's default, and every default client was locked out of a server that
-# had retired it. Nothing else here would have noticed — both cases above pass
-# whichever version the client sends, because both servers accept both.
-run "default client reaches a v2-only server" "open+user" "authentication failed" \
-  "AcceptedEnvelopeVersions 2"
+# SIP-29. A server that accepts only the version squic's client currently emits
+# must be reachable by a *default* client. This case exists because it once was
+# not: sqssh's own config layer resolved an unset EnvelopeVersion to 1, pinning
+# version 1 on top of squic's default, and every default client was locked out
+# of a server that had retired it. Nothing else here would notice — both cases
+# above pass whichever version the client sends, because both servers accept
+# every version.
+#
+# The number tracks squic's client default and has to move when that moves. It
+# was 2, and stayed 2 after squic v0.20.0 moved the default to 3, which turned
+# this case from a guard into a red tick nobody read: a default v3 client
+# cannot reach a v2-only server, and it is right not to. Narrowing the server
+# to the *current* default is what keeps the original regression caught.
+run "default client reaches a v3-only server" "open+user" "authentication failed" \
+  "AcceptedEnvelopeVersions 3"
 echo "=== pass=$pass fail=$fail ==="
 exit "$fail"

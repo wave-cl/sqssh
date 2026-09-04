@@ -164,7 +164,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let identity_path = cli
         .identity
         .clone()
-        .or(resolved.identity_file.map(PathBuf::from))
+        .or(resolved.identity_file.clone().map(PathBuf::from))
         .unwrap_or_else(|| sqssh_dir.join("id_ed25519"));
     let signing_key = keys::load_private_key(&identity_path)?;
     let verifying_key = signing_key.verifying_key();
@@ -183,10 +183,14 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
 
+    // Through the shared helper, not a copy of it. This rule has one job — an
+    // unset option must be left to squic's default rather than pinned to a
+    // version — and it was wrong once already, resolving unset to 1 and
+    // locking every default client out of a server that had retired it. Three
+    // inlined copies is three places for that to come back, and the test that
+    // guards it only ever exercised the helper.
     let mut squic_config = squic_config;
-    if let Some(v) = resolved.envelope_version {
-        squic_config.envelope_version = v;
-    }
+    sqssh_core::config::apply_client_envelope_version(&mut squic_config, &resolved);
     let conn = squic::dial(addr, server_pubkey.as_bytes(), squic_config)
         .await
         .map_err(|e| {
@@ -279,10 +283,14 @@ async fn reconnect_raw_shell(
         ..Default::default()
     };
 
+    // Through the shared helper, not a copy of it. This rule has one job — an
+    // unset option must be left to squic's default rather than pinned to a
+    // version — and it was wrong once already, resolving unset to 1 and
+    // locking every default client out of a server that had retired it. Three
+    // inlined copies is three places for that to come back, and the test that
+    // guards it only ever exercised the helper.
     let mut squic_config = squic_config;
-    if let Some(v) = resolved.envelope_version {
-        squic_config.envelope_version = v;
-    }
+    sqssh_core::config::apply_client_envelope_version(&mut squic_config, &resolved);
     let conn = squic::dial(addr, server_pubkey.as_bytes(), squic_config).await?;
 
     let (mut auth_send, mut auth_recv) = conn.open_bi().await?;
