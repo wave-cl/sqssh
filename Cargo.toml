@@ -39,3 +39,12 @@ whoami = "1"
 tempfile = "3"
 argon2 = "0.5"
 chacha20poly1305 = "0.10"
+
+# Debug info is the bulk of a test binary on any target that embeds it — which
+# is Linux, and so CI. Our own crates keep full symbols; dependencies drop to
+# line tables, which still give file:line in a panic. macOS is unaffected
+# either way: it defaults to split-debuginfo=unpacked, so the debug info was
+# never in the binary there. Measured at 78.1 MB -> 50.0 MB on
+# x86_64-unknown-linux-gnu, and at nothing worth having on macOS.
+[profile.dev.package."*"]
+debug = "line-tables-only"
