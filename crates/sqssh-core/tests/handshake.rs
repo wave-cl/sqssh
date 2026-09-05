@@ -128,27 +128,34 @@ async fn a_client_naming_no_version_reaches_a_server_that_kept_only_the_default(
     let _ = accepting.await;
 }
 
-/// The negative control. A server that accepts only a version the client is not
-/// sending drops the Initial in silence, so the failure is a timeout with no
-/// diagnostic — which is what makes the positive cases above worth having, and
-/// what proves they can fail at all.
+/// The negative control, in the only form it can still take.
+///
+/// It used to stand up a server accepting one version below the client's and
+/// assert the Initial was dropped in silence — a timeout with no diagnostic,
+/// which is what made the positive cases above worth having. squic v0.24.1
+/// closed that off: a server whose accept set names a version the build cannot
+/// parse is now refused at `listen`, because the silent version of this was a
+/// live outage waiting to happen. ex ran `accepted_envelope_versions = [3]` up
+/// to the v4 cut.
+///
+/// So the control moves from "the handshake fails quietly" to "the server never
+/// starts", which is strictly better and still proves the positive cases can
+/// fail: a config that cannot serve this client is now rejected before a socket
+/// exists, rather than after.
 #[tokio::test]
-async fn a_retired_version_is_refused_in_silence() {
+async fn a_retired_version_is_refused_at_listen() {
     let current = squic::Config::default().envelope_version;
-    let other = if current == 1 { 2 } else { current - 1 };
-    let (server_cfg, _) = server_config(&format!("Port 22\nAcceptedEnvelopeVersions {other}\n"));
-    let (listener, addr, server_pub) = listen(server_cfg).await;
+    let retired = current - 1;
+    let (server_cfg, _) = server_config(&format!("Port 22\nAcceptedEnvelopeVersions {retired}\n"));
 
-    // The client names the version the server has retired.
-    let client = client_config(
-        &format!("Host test\n    EnvelopeVersion {current}\n"),
-        "test",
-        &[11u8; 32],
-    );
-    let conn = squic::dial(addr, &server_pub, client).await;
+    let (signing_key, _public) = squic::generate_keypair();
+    let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let err = match squic::listen(addr, &signing_key, server_cfg).await {
+        Ok(_) => panic!("listen bound on retired envelope version {retired}"),
+        Err(e) => e.to_string(),
+    };
     assert!(
-        conn.is_err(),
-        "a server that retired this version admitted it anyway"
+        err.contains("accepted_envelope_versions"),
+        "listen failed for the wrong reason: {err}"
     );
-    drop(listener);
 }
