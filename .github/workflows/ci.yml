@@ -8,6 +8,39 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      # No cache and no dependency fetch: `cargo metadata --no-deps` reports
+      # the workspace members without resolving anything, and rustfmt parses
+      # rather than compiles. This job gives its answer in seconds.
+      #
+      # `cargo fmt --all` would be correct here *today*, because squic is a
+      # git dependency and there is no path dep for it to walk into. It is
+      # still not used. `--all` formats the workspace **and the path-based
+      # dependencies of its members**, so the day squic is switched to a path
+      # for local co-development — the arrangement bti and oxwrt both have —
+      # `--all` silently starts rewriting that checkout instead. The scoped
+      # form costs nothing and cannot acquire that behaviour.
+      #
+      # The list is derived rather than written out, so adding a crate cannot
+      # leave it unchecked with the job still green, and is echoed so a green
+      # run shows what it covered rather than only that nothing failed.
+      - name: Format
+        run: |
+          args=()
+          while read -r n; do args+=(-p "$n"); done \
+            < <(cargo metadata --no-deps --format-version 1 | jq -r '.packages[].name')
+          test ${#args[@]} -gt 0
+          echo "checking: ${args[*]}"
+          cargo fmt "${args[@]}" -- --check
+
   test:
     runs-on: ubuntu-latest
     steps:
