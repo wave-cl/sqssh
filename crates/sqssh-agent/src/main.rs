@@ -6,9 +6,7 @@ use std::sync::Arc;
 use clap::Parser;
 use ed25519_dalek::SigningKey;
 use sqssh_core::keys;
-use sqssh_core::protocol::{
-    AgentKeyEntry, AgentRequest, AgentResponse,
-};
+use sqssh_core::protocol::{AgentKeyEntry, AgentRequest, AgentResponse};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::RwLock;
 
@@ -66,11 +64,7 @@ fn kill_agent(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| sqssh_dir.join("agent.sock"));
 
     if !socket_path.exists() {
-        return Err(format!(
-            "agent socket not found at {}",
-            socket_path.display()
-        )
-        .into());
+        return Err(format!("agent socket not found at {}", socket_path.display()).into());
     }
 
     // Try to find the agent process by checking who has the socket open
@@ -106,18 +100,14 @@ fn kill_agent(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
 
 async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let sqssh_dir = keys::ensure_sqssh_dir()?;
-    let socket_path = cli
-        .socket
-        .unwrap_or_else(|| sqssh_dir.join("agent.sock"));
+    let socket_path = cli.socket.unwrap_or_else(|| sqssh_dir.join("agent.sock"));
 
     // Remove stale socket — only if it's actually a socket, not a symlink
     if let Ok(meta) = std::fs::symlink_metadata(&socket_path) {
         if meta.file_type().is_symlink() {
-            return Err(format!(
-                "refusing to start: {} is a symlink",
-                socket_path.display()
-            )
-            .into());
+            return Err(
+                format!("refusing to start: {} is a symlink", socket_path.display()).into(),
+            );
         }
         if meta.file_type().is_socket() {
             std::fs::remove_file(&socket_path)?;
@@ -127,10 +117,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::UnixListener::bind(&socket_path)?;
 
     // Set socket permissions to owner-only
-    std::fs::set_permissions(
-        &socket_path,
-        std::fs::Permissions::from_mode(0o600),
-    )?;
+    std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
 
     // Print shell commands for eval (like ssh-agent)
     println!(

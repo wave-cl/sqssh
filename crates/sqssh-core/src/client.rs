@@ -23,10 +23,17 @@ pub fn parse_remote(s: &str) -> Option<RemoteSpec> {
     let colon = s.find(':')?;
     let userhost = &s[..colon];
     let path = &s[colon + 1..];
-    let path = if path.is_empty() { None } else { Some(path.to_string()) };
+    let path = if path.is_empty() {
+        None
+    } else {
+        Some(path.to_string())
+    };
 
     let (user, host) = if let Some(at) = userhost.find('@') {
-        (Some(userhost[..at].to_string()), userhost[at + 1..].to_string())
+        (
+            Some(userhost[..at].to_string()),
+            userhost[at + 1..].to_string(),
+        )
     } else {
         (None, userhost.to_string())
     };
@@ -94,14 +101,20 @@ pub async fn connect(
     // Key name for key_map (relative to ~/.sqssh/)
     let (signing_key, verifying_key, key_name) = if let Some(id_path) = identity {
         let path = PathBuf::from(id_path);
-        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
         let sk = keys::load_private_key(&path)?;
         let vk = sk.verifying_key();
         tracing::debug!("using explicit identity: {}", path.display());
         (sk, vk, name)
     } else if let Some(ref config_id) = resolved.identity_file {
         let path = PathBuf::from(config_id);
-        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
         let sk = keys::load_private_key(&path)?;
         let vk = sk.verifying_key();
         tracing::debug!("using config IdentityFile: {}", path.display());
@@ -110,7 +123,10 @@ pub async fn connect(
         tracing::debug!("using key from agent");
         (sk, vk, String::new()) // agent keys don't map to a file
     } else if let Some(mapped_path) = keys::key_for_host(host) {
-        let name = mapped_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let name = mapped_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
         let sk = keys::load_private_key(&mapped_path)?;
         let vk = sk.verifying_key();
         tracing::debug!("using key_map: {}", mapped_path.display());
@@ -155,7 +171,10 @@ pub async fn connect(
         .await
         .map_err(|e| Error::Connection(format!("failed to open auth stream: {e}")))?;
     auth_send
-        .write_all(&protocol::encode_auth_request(&username, verifying_key.as_bytes()))
+        .write_all(&protocol::encode_auth_request(
+            &username,
+            verifying_key.as_bytes(),
+        ))
         .await
         .map_err(|e| Error::Connection(format!("failed to send auth request: {e}")))?;
 
@@ -197,9 +216,7 @@ fn try_agent_key() -> Option<(SigningKey, VerifyingKey)> {
     let response = AgentResponse::decode(&mut stream).ok()?;
 
     let pubkey_bytes = match response {
-        AgentResponse::Keys { entries } if !entries.is_empty() => {
-            entries[0].pubkey.clone()
-        }
+        AgentResponse::Keys { entries } if !entries.is_empty() => entries[0].pubkey.clone(),
         _ => return None,
     };
 
@@ -211,7 +228,8 @@ fn try_agent_key() -> Option<(SigningKey, VerifyingKey)> {
     let mut stream = UnixStream::connect(&socket_path).ok()?;
     let data = AgentRequest::GetSeed {
         pubkey: pubkey_bytes.clone(),
-    }.encode();
+    }
+    .encode();
     stream.write_all(&data).ok()?;
     let response = AgentResponse::decode(&mut stream).ok()?;
 

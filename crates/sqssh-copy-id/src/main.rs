@@ -6,7 +6,11 @@ use sqssh_core::keys;
 use sqssh_core::protocol;
 
 #[derive(Parser)]
-#[command(name = "sqssh-copy-id", about = "Deploy public key to remote host", version)]
+#[command(
+    name = "sqssh-copy-id",
+    about = "Deploy public key to remote host",
+    version
+)]
 struct Cli {
     /// [user@]hostname
     destination: String,
@@ -116,10 +120,10 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     header.push(protocol::RAW_EXEC);
     header.extend_from_slice(&(cmd_bytes.len() as u16).to_be_bytes());
     header.extend_from_slice(cmd_bytes);
-    send.write_all(&header).await
+    send.write_all(&header)
+        .await
         .map_err(|e| format!("write exec header: {e}"))?;
-    send.finish()
-        .map_err(|e| format!("finish: {e}"))?;
+    send.finish().map_err(|e| format!("finish: {e}"))?;
 
     // Read all response data (stdout + 4-byte exit code at the end)
     let mut all_data = Vec::new();
@@ -135,7 +139,12 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Extract exit code from last 4 bytes, rest is stdout
     let (stdout, exit_code) = if all_data.len() >= 4 {
         let off = all_data.len() - 4;
-        let code = u32::from_be_bytes([all_data[off], all_data[off + 1], all_data[off + 2], all_data[off + 3]]);
+        let code = u32::from_be_bytes([
+            all_data[off],
+            all_data[off + 1],
+            all_data[off + 2],
+            all_data[off + 3],
+        ]);
         (all_data[..off].to_vec(), code)
     } else {
         (all_data, 0u32)

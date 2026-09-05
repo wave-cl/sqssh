@@ -93,9 +93,7 @@ async fn main() {
 
     let level = if cli.verbose { "debug" } else { "warn" };
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_new(level).unwrap_or_default(),
-        )
+        .with_env_filter(tracing_subscriber::EnvFilter::try_new(level).unwrap_or_default())
         .with_target(false)
         .init();
 
@@ -129,7 +127,9 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
 
     // Load config
     let sqssh_dir = keys::sqssh_dir()?;
-    let config_path = cli.config_file.as_deref()
+    let config_path = cli
+        .config_file
+        .as_deref()
         .map(PathBuf::from)
         .unwrap_or_else(|| sqssh_dir.join("config"));
     let config = ClientConfig::load(&config_path)?;
@@ -147,18 +147,18 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         keys::decode_pubkey(hk)?
     } else {
         let known_hosts = KnownHosts::load(&sqssh_dir.join("known_hosts"))?;
-        *known_hosts.lookup(actual_host).ok_or_else(|| {
-            sqssh_core::error::Error::UnknownHost(actual_host.to_string())
-        })?
+        *known_hosts
+            .lookup(actual_host)
+            .ok_or_else(|| sqssh_core::error::Error::UnknownHost(actual_host.to_string()))?
     };
 
     // Resolve address
     let addr: SocketAddr = format!("{actual_host}:{port}")
         .to_socket_addrs()?
         .next()
-        .ok_or_else(|| sqssh_core::error::Error::Connection(
-            format!("could not resolve {actual_host}:{port}")
-        ))?;
+        .ok_or_else(|| {
+            sqssh_core::error::Error::Connection(format!("could not resolve {actual_host}:{port}"))
+        })?;
 
     // Load identity key
     let identity_path = cli
@@ -193,14 +193,15 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     sqssh_core::config::apply_client_envelope_version(&mut squic_config, &resolved);
     let conn = squic::dial(addr, server_pubkey.as_bytes(), squic_config)
         .await
-        .map_err(|e| {
-            sqssh_core::error::format_connection_error(&e.to_string())
-        })?;
+        .map_err(|e| sqssh_core::error::format_connection_error(&e.to_string()))?;
 
     // Authenticate on stream 0 (raw binary)
     let (mut auth_send, mut auth_recv) = conn.open_bi().await?;
     auth_send
-        .write_all(&protocol::encode_auth_request(&user, verifying_key.as_bytes()))
+        .write_all(&protocol::encode_auth_request(
+            &user,
+            verifying_key.as_bytes(),
+        ))
         .await?;
 
     match protocol::decode_auth_response(&mut auth_recv).await? {
@@ -240,7 +241,9 @@ async fn reconnect_raw_shell(
     let cli = Cli::parse();
     let (user, host) = parse_destination(&cli.destination)?;
     let sqssh_dir = keys::sqssh_dir()?;
-    let config_path = cli.config_file.as_deref()
+    let config_path = cli
+        .config_file
+        .as_deref()
         .map(PathBuf::from)
         .unwrap_or_else(|| sqssh_dir.join("config"));
     let config = ClientConfig::load(&config_path)?;
@@ -257,9 +260,9 @@ async fn reconnect_raw_shell(
         keys::decode_pubkey(hk)?
     } else {
         let known_hosts = KnownHosts::load(&sqssh_dir.join("known_hosts"))?;
-        *known_hosts.lookup(actual_host).ok_or_else(|| {
-            sqssh_core::error::Error::UnknownHost(actual_host.to_string())
-        })?
+        *known_hosts
+            .lookup(actual_host)
+            .ok_or_else(|| sqssh_core::error::Error::UnknownHost(actual_host.to_string()))?
     };
 
     let addr: SocketAddr = format!("{actual_host}:{port}")
@@ -295,7 +298,10 @@ async fn reconnect_raw_shell(
 
     let (mut auth_send, mut auth_recv) = conn.open_bi().await?;
     auth_send
-        .write_all(&protocol::encode_auth_request(&user, verifying_key.as_bytes()))
+        .write_all(&protocol::encode_auth_request(
+            &user,
+            verifying_key.as_bytes(),
+        ))
         .await?;
 
     match protocol::decode_auth_response(&mut auth_recv).await? {
@@ -330,13 +336,25 @@ async fn reconnect_raw_shell(
 
 async fn open_raw_shell(
     conn: &quinn::Connection,
-) -> Result<(quinn::SendStream, quinn::RecvStream, quinn::SendStream, quinn::RecvStream), Box<dyn std::error::Error>> {
+) -> Result<
+    (
+        quinn::SendStream,
+        quinn::RecvStream,
+        quinn::SendStream,
+        quinn::RecvStream,
+    ),
+    Box<dyn std::error::Error>,
+> {
     let (cols, rows) = term_size();
     let term = std::env::var("TERM").unwrap_or_else(|_| "xterm-256color".into());
 
     // Open data stream (raw bidi for stdin/stdout)
     let (mut data_send, data_recv) = conn.open_bi().await?;
-    let header = RawShellHeader { term, cols: cols as u32, rows: rows as u32 };
+    let header = RawShellHeader {
+        term,
+        cols: cols as u32,
+        rows: rows as u32,
+    };
     data_send.write_all(&header.encode()).await?;
 
     // Open control stream (for window change, exit status)
@@ -393,9 +411,7 @@ async fn run_raw_shell(
         if msg.contains("server restarting") {
             conn.close(quinn::VarInt::from_u32(0), b"reconnecting");
             eprintln!("\r\nServer restarting. Reconnecting...");
-        } else if msg.contains("server shutting down")
-            || msg.contains("application close")
-        {
+        } else if msg.contains("server shutting down") || msg.contains("application close") {
             eprintln!("\r\nConnection closed by remote host.");
             conn.close(quinn::VarInt::from_u32(0), b"");
             std::process::exit(0);
@@ -535,7 +551,8 @@ async fn relay_raw_stdio(
     // Spawn SIGWINCH handler
     let (winch_tx, mut winch_rx) = tokio::sync::mpsc::channel::<(u32, u32)>(4);
     tokio::spawn(async move {
-        let mut sig = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change()).unwrap();
+        let mut sig =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::window_change()).unwrap();
         loop {
             sig.recv().await;
             let (cols, rows) = term_size();

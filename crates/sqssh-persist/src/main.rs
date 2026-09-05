@@ -25,9 +25,7 @@ fn main() {
         return;
     }
 
-    tracing_subscriber::fmt()
-        .with_target(false)
-        .init();
+    tracing_subscriber::fmt().with_target(false).init();
 
     if let Err(e) = run() {
         eprintln!("sqssh-persist: {e}");
@@ -54,8 +52,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let (fds, data) = fdpass::recv_fds(&stream, 256)?;
     drop(stream);
 
-    let payload = PersistPayload::decode(&data)
-        .map_err(|e| format!("failed to decode payload: {e}"))?;
+    let payload =
+        PersistPayload::decode(&data).map_err(|e| format!("failed to decode payload: {e}"))?;
 
     tracing::info!(
         "received {} session(s) with {} fd(s)",
@@ -70,7 +68,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             session.username,
             session.child_pid,
             session.term,
-            fds.get(i).map(|f| f.to_string()).unwrap_or_else(|| "?".into()),
+            fds.get(i)
+                .map(|f| f.to_string())
+                .unwrap_or_else(|| "?".into()),
         );
     }
 
@@ -108,7 +108,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             tracing::warn!("closing {} orphaned session(s)", payload.sessions.len());
             // Close the fds — this will cause shells to get SIGHUP
             for fd in &fds {
-                unsafe { libc::close(*fd); }
+                unsafe {
+                    libc::close(*fd);
+                }
             }
         }
     }

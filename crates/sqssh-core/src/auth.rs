@@ -110,7 +110,10 @@ fn safe_read_authorized_keys(path: &Path, expected_uid: Option<u32>) -> Result<S
 
 impl AuthorizedKeys {
     /// Load authorized_keys from a file with safety checks.
-    pub fn load_file(path: &Path, expected_uid: Option<u32>) -> Result<Vec<(VerifyingKey, String)>> {
+    pub fn load_file(
+        path: &Path,
+        expected_uid: Option<u32>,
+    ) -> Result<Vec<(VerifyingKey, String)>> {
         let content = safe_read_authorized_keys(path, expected_uid)?;
         if content.is_empty() {
             return Ok(Vec::new());
@@ -185,10 +188,7 @@ impl AuthorizedKeys {
                             username: username.to_string(),
                             comment: comment.clone(),
                         };
-                        ak.entries
-                            .entry(*key.as_bytes())
-                            .or_default()
-                            .push(entry);
+                        ak.entries.entry(*key.as_bytes()).or_default().push(entry);
                     }
                 }
                 Ok(_) => {}
@@ -211,19 +211,13 @@ impl AuthorizedKeys {
 
         let keys = Self::load_file(ak_path, Some(uid))?;
         if !keys.is_empty() {
-            tracing::info!(
-                "reloaded {} key(s) for user '{username}'",
-                keys.len()
-            );
+            tracing::info!("reloaded {} key(s) for user '{username}'", keys.len());
             for (key, comment) in &keys {
                 let entry = AuthorizedEntry {
                     username: username.to_string(),
                     comment: comment.clone(),
                 };
-                self.entries
-                    .entry(*key.as_bytes())
-                    .or_default()
-                    .push(entry);
+                self.entries.entry(*key.as_bytes()).or_default().push(entry);
             }
         }
         Ok(())
@@ -241,5 +235,4 @@ impl AuthorizedKeys {
     pub fn all_pubkeys(&self) -> Vec<[u8; 32]> {
         self.entries.keys().copied().collect()
     }
-
 }

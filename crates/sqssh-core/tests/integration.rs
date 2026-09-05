@@ -59,14 +59,16 @@ fn test_known_hosts_roundtrip() {
 fn test_config_parse() {
     use sqssh_core::config::ClientConfig;
 
-    let config = ClientConfig::parse("
+    let config = ClientConfig::parse(
+        "
         Port 4022
         User testuser
 
         Host dev
             HostName dev.example.com
             User alice
-    ")
+    ",
+    )
     .unwrap();
 
     let resolved = config.resolve("dev");
@@ -80,14 +82,16 @@ fn test_server_config_parse() {
     use sqssh_core::auth::AuthMode;
     use sqssh_core::config::ServerConfig;
 
-    let config = ServerConfig::parse("
+    let config = ServerConfig::parse(
+        "
         Port 4022
         AuthMode open+user
         MaxSessions 128
         MaxAuthTries 3
         AllowUsers root admin
         PrintMotd no
-    ")
+    ",
+    )
     .unwrap();
 
     assert_eq!(config.port, 4022);

@@ -4,7 +4,11 @@ use clap::Parser;
 use sqssh_core::keys;
 
 #[derive(Parser)]
-#[command(name = "sqssh-keygen", about = "Generate sqssh Ed25519 keypairs", version)]
+#[command(
+    name = "sqssh-keygen",
+    about = "Generate sqssh Ed25519 keypairs",
+    version
+)]
 struct Cli {
     /// Output file path for the private key (public key gets .pub suffix)
     #[arg(short = 'f', long = "file")]
@@ -131,10 +135,7 @@ fn generate_key(cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     let pub_path = priv_path.with_extension("pub");
 
     if priv_path.exists() {
-        eprintln!(
-            "{} already exists. Overwrite? (y/n) ",
-            priv_path.display()
-        );
+        eprintln!("{} already exists. Overwrite? (y/n) ", priv_path.display());
         let mut input = String::new();
         std::io::stdin().read_line(&mut input)?;
         if !input.trim().eq_ignore_ascii_case("y") {
@@ -208,7 +209,8 @@ fn change_passphrase(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let signing_key = keys::load_private_key(path)?;
 
     // Prompt for new passphrase
-    let new_passphrase = keys::prompt_passphrase("Enter new passphrase (empty to remove encryption): ")?;
+    let new_passphrase =
+        keys::prompt_passphrase("Enter new passphrase (empty to remove encryption): ")?;
     if !new_passphrase.is_empty() {
         let confirm = keys::prompt_passphrase("Enter same passphrase again: ")?;
         if *new_passphrase != *confirm {
@@ -233,10 +235,7 @@ fn change_passphrase(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn import_openssh(
-    _path: &PathBuf,
-    _cli: &Cli,
-) -> Result<(), Box<dyn std::error::Error>> {
+fn import_openssh(_path: &PathBuf, _cli: &Cli) -> Result<(), Box<dyn std::error::Error>> {
     // TODO: Parse OpenSSH Ed25519 private key format and extract the 32-byte seed
     eprintln!("OpenSSH import is not yet implemented");
     std::process::exit(1);

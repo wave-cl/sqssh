@@ -215,8 +215,10 @@ impl ResolvedConfig {
         if let Some(ref v) = host.proxy_jump {
             self.proxy_jump = Some(v.clone());
         }
-        self.local_forwards.extend(host.local_forwards.iter().cloned());
-        self.remote_forwards.extend(host.remote_forwards.iter().cloned());
+        self.local_forwards
+            .extend(host.local_forwards.iter().cloned());
+        self.remote_forwards
+            .extend(host.remote_forwards.iter().cloned());
         self.udp_forwards.extend(host.udp_forwards.iter().cloned());
         if let Some(v) = host.dynamic_forward {
             self.dynamic_forward.get_or_insert(v);
@@ -511,7 +513,6 @@ impl ServerConfig {
     }
 }
 
-
 /// Apply a resolved host's SIP-29 envelope version to a squic client config.
 ///
 /// Only when the config actually named one. Leaving it alone otherwise is the
@@ -579,10 +580,9 @@ mod tests {
     /// become.
     #[test]
     fn envelope_version_is_unset_by_default_and_is_per_host() {
-        let cfg = ClientConfig::parse(
-            "Host new\n    EnvelopeVersion 2\n\nHost old\n    Port 2222\n",
-        )
-        .expect("parses");
+        let cfg =
+            ClientConfig::parse("Host new\n    EnvelopeVersion 2\n\nHost old\n    Port 2222\n")
+                .expect("parses");
 
         assert_eq!(cfg.resolve("new").envelope_version, Some(2));
         // Unset must stay unset. Resolving it to a number here would pin a

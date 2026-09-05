@@ -62,8 +62,6 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             println!("{message}");
             Ok(())
         }
-        CtlResponse::Error { message } => {
-            Err(message.into())
-        }
+        CtlResponse::Error { message } => Err(message.into()),
     }
 }

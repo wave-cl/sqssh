@@ -75,7 +75,11 @@ enum AcceptResult {
     /// Unidirectional stream (raw file upload).
     Uni(quinn::RecvStream),
     /// Raw shell data stream.
-    RawShell(quinn::SendStream, quinn::RecvStream, protocol::RawShellHeader),
+    RawShell(
+        quinn::SendStream,
+        quinn::RecvStream,
+        protocol::RawShellHeader,
+    ),
     /// Raw shell control stream.
     ShellControl,
     /// Raw SFTP session.
@@ -176,8 +180,7 @@ fn ed25519_to_x25519(ed_pub: &[u8; 32]) -> Option<[u8; 32]> {
 fn init_logging(cli: &Cli) {
     use tracing_subscriber::EnvFilter;
 
-    let filter = EnvFilter::try_new(&cli.log_level)
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_new(&cli.log_level).unwrap_or_else(|_| EnvFilter::new("info"));
 
     if cli.log_json {
         tracing_subscriber::fmt()
@@ -263,8 +266,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     }
 
     // Load authorized_keys for all system users
-    let authorized_keys =
-        AuthorizedKeys::load_all_users(&server_config.authorized_keys_file)?;
+    let authorized_keys = AuthorizedKeys::load_all_users(&server_config.authorized_keys_file)?;
     let ak_pubkeys = authorized_keys.all_pubkeys();
 
     tracing::info!(
@@ -273,13 +275,10 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     );
 
     // Convert Ed25519 pubkeys to X25519 for squic whitelist
-    let whitelist_keys: Vec<[u8; 32]> = ak_pubkeys
-        .iter()
-        .filter_map(ed25519_to_x25519)
-        .collect();
+    let whitelist_keys: Vec<[u8; 32]> = ak_pubkeys.iter().filter_map(ed25519_to_x25519).collect();
 
-    let addr: SocketAddr = format!("{}:{}", server_config.listen_address, server_config.port)
-        .parse()?;
+    let addr: SocketAddr =
+        format!("{}:{}", server_config.listen_address, server_config.port).parse()?;
 
     let squic_config = squic::Config {
         alpn_protocols: vec![protocol::ALPN.to_vec()],
@@ -303,7 +302,11 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing::info!("auth mode: {:?}", server_config.auth_mode);
     tracing::info!(
         "connection migration: {}",
-        if server_config.connection_migration { "enabled" } else { "disabled" }
+        if server_config.connection_migration {
+            "enabled"
+        } else {
+            "disabled"
+        }
     );
 
     // Shutdown coordination
@@ -407,7 +410,9 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     {
         let sessions = state.pty_sessions.lock().await;
         for session in sessions.values() {
-            unsafe { libc::kill(session.info.child_pid as i32, libc::SIGHUP); }
+            unsafe {
+                libc::kill(session.info.child_pid as i32, libc::SIGHUP);
+            }
         }
     }
 
@@ -497,7 +502,8 @@ async fn handle_ctl_connection(
 
     // Read request (binary)
     let mut stream = stream;
-    let request = CtlRequest::decode_async(&mut stream).await
+    let request = CtlRequest::decode_async(&mut stream)
+        .await
         .map_err(|e| format!("invalid request: {e}"))?;
 
     let response = match request {
@@ -623,8 +629,7 @@ async fn persist_sessions(state: &ServerState) {
     }
 
     // Start sqssh-persist helper
-    let persist_result = std::process::Command::new("sqssh-persist")
-        .spawn();
+    let persist_result = std::process::Command::new("sqssh-persist").spawn();
 
     let mut persist_child = match persist_result {
         Ok(child) => child,
@@ -725,7 +730,9 @@ async fn recover_persisted_sessions(state: &ServerState) {
                 session.username,
                 session.child_pid
             );
-            unsafe { libc::close(fd); }
+            unsafe {
+                libc::close(fd);
+            }
             continue;
         }
 
@@ -755,7 +762,9 @@ async fn handle_connection(
     tracing::info!("connected");
 
     // Accept auth stream (stream 0) — raw binary protocol
-    let (mut auth_send, mut auth_recv) = conn.accept_bi().await
+    let (mut auth_send, mut auth_recv) = conn
+        .accept_bi()
+        .await
         .map_err(|e| format!("failed to accept auth stream: {e}"))?;
 
     // Auth loop with MaxAuthTries
@@ -763,7 +772,9 @@ async fn handle_connection(
     let (username, pubkey_bytes) = loop {
         // Read type byte
         let mut type_buf = [0u8; 1];
-        auth_recv.read_exact(&mut type_buf).await
+        auth_recv
+            .read_exact(&mut type_buf)
+            .await
             .map_err(|e| format!("auth type byte: {e}"))?;
 
         if type_buf[0] != protocol::AUTH_REQUEST {
@@ -841,7 +852,9 @@ async fn handle_connection(
 
         tracing::warn!(user = %username, "auth rejected");
         auth_send
-            .write_all(&protocol::encode_auth_failure("pubkey not authorized for this user"))
+            .write_all(&protocol::encode_auth_failure(
+                "pubkey not authorized for this user",
+            ))
             .await?;
 
         if auth_attempts >= state.max_auth_tries {
@@ -863,9 +876,10 @@ async fn handle_connection(
     };
 
     // Read banner file content for sending on first session channel
-    let banner_content = state.banner.as_ref().and_then(|path| {
-        std::fs::read_to_string(path).ok()
-    });
+    let banner_content = state
+        .banner
+        .as_ref()
+        .and_then(|path| std::fs::read_to_string(path).ok());
 
     // Spawn migration monitor
     let migration_conn = conn.clone();
@@ -1014,31 +1028,36 @@ async fn handle_connection(
             AcceptResult::Uni(mut recv) => {
                 let user = username.clone();
                 let progress = uploads_done.clone();
-                tokio::spawn(async move {
-                    // Counted however the stream ends, including on error, so a
-                    // failed upload cannot leave a sync waiting on it forever.
-                    let _guard = progress.stream_guard();
-                    let mut type_buf = [0u8; 1];
-                    if let Err(e) = recv.read_exact(&mut type_buf).await {
-                        tracing::error!("failed to read uni stream type: {e}");
-                        return;
-                    }
-                    match type_buf[0] {
-                        protocol::RAW_UPLOAD => {
-                            if let Err(e) = file_handler::handle_raw_upload(recv, &user).await {
-                                tracing::error!("raw upload error: {e}");
+                tokio::spawn(
+                    async move {
+                        // Counted however the stream ends, including on error, so a
+                        // failed upload cannot leave a sync waiting on it forever.
+                        let _guard = progress.stream_guard();
+                        let mut type_buf = [0u8; 1];
+                        if let Err(e) = recv.read_exact(&mut type_buf).await {
+                            tracing::error!("failed to read uni stream type: {e}");
+                            return;
+                        }
+                        match type_buf[0] {
+                            protocol::RAW_UPLOAD => {
+                                if let Err(e) = file_handler::handle_raw_upload(recv, &user).await {
+                                    tracing::error!("raw upload error: {e}");
+                                }
+                            }
+                            protocol::RAW_UPLOAD_CHUNK => {
+                                if let Err(e) =
+                                    file_handler::handle_raw_upload_chunk(recv, &user).await
+                                {
+                                    tracing::error!("raw chunk upload error: {e}");
+                                }
+                            }
+                            other => {
+                                tracing::warn!("unknown uni stream type: {other:#x}");
                             }
                         }
-                        protocol::RAW_UPLOAD_CHUNK => {
-                            if let Err(e) = file_handler::handle_raw_upload_chunk(recv, &user).await {
-                                tracing::error!("raw chunk upload error: {e}");
-                            }
-                        }
-                        other => {
-                            tracing::warn!("unknown uni stream type: {other:#x}");
-                        }
                     }
-                }.in_current_span());
+                    .in_current_span(),
+                );
                 continue;
             }
             AcceptResult::RawShell(data_send, data_recv, header) => {
@@ -1048,7 +1067,10 @@ async fn handle_connection(
                 let current = state.active_sessions.fetch_add(1, Relaxed);
                 if current >= state.max_sessions {
                     state.active_sessions.fetch_sub(1, Relaxed);
-                    tracing::warn!("max sessions ({}) reached, rejecting raw shell", state.max_sessions);
+                    tracing::warn!(
+                        "max sessions ({}) reached, rejecting raw shell",
+                        state.max_sessions
+                    );
                     continue;
                 }
 
@@ -1094,18 +1116,35 @@ async fn handle_connection(
                     async move {
                         if let Some((fd, info)) = resumed_fd {
                             if let Err(e) = pty_handler::resume_raw_shell(
-                                data_send, data_recv, ctrl_send, ctrl_recv,
-                                fd, info.child_pid,
-                                header.cols as u16, header.rows as u16,
-                            ).await {
+                                data_send,
+                                data_recv,
+                                ctrl_send,
+                                ctrl_recv,
+                                fd,
+                                info.child_pid,
+                                header.cols as u16,
+                                header.rows as u16,
+                            )
+                            .await
+                            {
                                 tracing::error!("raw resume error: {e}");
                             }
                         } else if let Err(e) = handle_raw_session_with_persist(
-                            data_send, data_recv, ctrl_send, ctrl_recv,
-                            &header, &user, &remote_host,
-                            print_motd, print_last_log, banner,
-                            &state_ref, client_pk,
-                        ).await {
+                            data_send,
+                            data_recv,
+                            ctrl_send,
+                            ctrl_recv,
+                            &header,
+                            &user,
+                            &remote_host,
+                            print_motd,
+                            print_last_log,
+                            banner,
+                            &state_ref,
+                            client_pk,
+                        )
+                        .await
+                        {
                             tracing::error!("raw session error: {e}");
                         }
                         state_ref.active_sessions.fetch_sub(1, Relaxed);
@@ -1125,8 +1164,13 @@ async fn handle_connection(
                 tokio::spawn(
                     async move {
                         if let Err(e) = sftp_handler::handle_sftp(
-                            &mut sftp_send, &mut sftp_recv, &conn_for_sftp, &user,
-                        ).await {
+                            &mut sftp_send,
+                            &mut sftp_recv,
+                            &conn_for_sftp,
+                            &user,
+                        )
+                        .await
+                        {
                             tracing::error!("raw sftp error: {e}");
                         }
                     }
@@ -1140,8 +1184,14 @@ async fn handle_connection(
                 tokio::spawn(
                     async move {
                         if let Err(e) = pty_handler::run_raw_exec(
-                            exec_send, exec_recv, &conn_for_exec, &user, &command,
-                        ).await {
+                            exec_send,
+                            exec_recv,
+                            &conn_for_exec,
+                            &user,
+                            &command,
+                        )
+                        .await
+                        {
                             tracing::error!(cmd = %command, "raw exec error: {e}");
                         }
                     }
@@ -1156,7 +1206,9 @@ async fn handle_connection(
                     async move {
                         if let Err(e) = file_handler::handle_raw_download(
                             &conn_ref, dl_send, dl_recv, &user, &path, jobs,
-                        ).await {
+                        )
+                        .await
+                        {
                             tracing::error!(path = %path, "raw download error: {e}");
                         }
                     }
@@ -1190,21 +1242,36 @@ async fn handle_raw_session_with_persist(
     let term = header.term.clone();
     let cols = header.cols as u16;
     let rows = header.rows as u16;
-    let session_id = state.next_session_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let session_id = state
+        .next_session_id
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     let (spawn_tx, spawn_rx) = tokio::sync::oneshot::channel::<ActivePtySession>();
 
     let state_for_reg = state.clone();
     tokio::spawn(async move {
         if let Ok(session) = spawn_rx.await {
-            state_for_reg.pty_sessions.lock().await.insert(session_id, session);
+            state_for_reg
+                .pty_sessions
+                .lock()
+                .await
+                .insert(session_id, session);
         }
     });
 
     let term_clone = term.clone();
     pty_handler::run_raw_shell(
-        data_send, data_recv, ctrl_send, ctrl_recv,
-        username, remote_host, &term, cols, rows, print_motd, print_last_log,
+        data_send,
+        data_recv,
+        ctrl_send,
+        ctrl_recv,
+        username,
+        remote_host,
+        &term,
+        cols,
+        rows,
+        print_motd,
+        print_last_log,
         banner,
         move |spawned| {
             let info = PersistedSession {
@@ -1228,7 +1295,8 @@ async fn handle_raw_session_with_persist(
                 master_fd: spawned.master_raw_fd,
             });
         },
-    ).await
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -1259,7 +1327,10 @@ mod upload_progress_tests {
         drop(guards.pop());
         drop(guards.pop());
         tokio::time::sleep(Duration::from_millis(100)).await;
-        assert!(!waiter.is_finished(), "released before the last stream ended");
+        assert!(
+            !waiter.is_finished(),
+            "released before the last stream ended"
+        );
 
         drop(guards.pop());
         tokio::time::timeout(Duration::from_secs(2), waiter)

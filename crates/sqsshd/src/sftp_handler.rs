@@ -29,10 +29,19 @@ pub async fn handle_sftp(
                 let target = resolve_path(&cwd, &home, &path);
                 match list_dir(&target) {
                     Ok(entries) => {
-                        sftp_send.write_all(&SftpResp::DirListing { entries }.encode()).await?;
+                        sftp_send
+                            .write_all(&SftpResp::DirListing { entries }.encode())
+                            .await?;
                     }
                     Err(e) => {
-                        sftp_send.write_all(&SftpResp::Error { message: e.to_string() }.encode()).await?;
+                        sftp_send
+                            .write_all(
+                                &SftpResp::Error {
+                                    message: e.to_string(),
+                                }
+                                .encode(),
+                            )
+                            .await?;
                     }
                 }
             }
@@ -44,7 +53,14 @@ pub async fn handle_sftp(
                         sftp_send.write_all(&resp.encode()).await?;
                     }
                     Err(e) => {
-                        sftp_send.write_all(&SftpResp::Error { message: e.to_string() }.encode()).await?;
+                        sftp_send
+                            .write_all(
+                                &SftpResp::Error {
+                                    message: e.to_string(),
+                                }
+                                .encode(),
+                            )
+                            .await?;
                     }
                 }
             }
@@ -54,13 +70,26 @@ pub async fn handle_sftp(
                 match std::fs::create_dir(&target) {
                     Ok(()) => {
                         use std::os::unix::fs::PermissionsExt;
-                        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(mode)).ok();
-                        sftp_send.write_all(&SftpResp::Ok {
-                            message: format!("created {}", target.display()),
-                        }.encode()).await?;
+                        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(mode))
+                            .ok();
+                        sftp_send
+                            .write_all(
+                                &SftpResp::Ok {
+                                    message: format!("created {}", target.display()),
+                                }
+                                .encode(),
+                            )
+                            .await?;
                     }
                     Err(e) => {
-                        sftp_send.write_all(&SftpResp::Error { message: e.to_string() }.encode()).await?;
+                        sftp_send
+                            .write_all(
+                                &SftpResp::Error {
+                                    message: e.to_string(),
+                                }
+                                .encode(),
+                            )
+                            .await?;
                     }
                 }
             }
@@ -74,12 +103,24 @@ pub async fn handle_sftp(
                 };
                 match result {
                     Ok(()) => {
-                        sftp_send.write_all(&SftpResp::Ok {
-                            message: format!("removed {}", target.display()),
-                        }.encode()).await?;
+                        sftp_send
+                            .write_all(
+                                &SftpResp::Ok {
+                                    message: format!("removed {}", target.display()),
+                                }
+                                .encode(),
+                            )
+                            .await?;
                     }
                     Err(e) => {
-                        sftp_send.write_all(&SftpResp::Error { message: e.to_string() }.encode()).await?;
+                        sftp_send
+                            .write_all(
+                                &SftpResp::Error {
+                                    message: e.to_string(),
+                                }
+                                .encode(),
+                            )
+                            .await?;
                     }
                 }
             }
@@ -89,12 +130,24 @@ pub async fn handle_sftp(
                 let new = resolve_path(&cwd, &home, &new_path);
                 match std::fs::rename(&old, &new) {
                     Ok(()) => {
-                        sftp_send.write_all(&SftpResp::Ok {
-                            message: format!("{} -> {}", old.display(), new.display()),
-                        }.encode()).await?;
+                        sftp_send
+                            .write_all(
+                                &SftpResp::Ok {
+                                    message: format!("{} -> {}", old.display(), new.display()),
+                                }
+                                .encode(),
+                            )
+                            .await?;
                     }
                     Err(e) => {
-                        sftp_send.write_all(&SftpResp::Error { message: e.to_string() }.encode()).await?;
+                        sftp_send
+                            .write_all(
+                                &SftpResp::Error {
+                                    message: e.to_string(),
+                                }
+                                .encode(),
+                            )
+                            .await?;
                     }
                 }
             }
@@ -104,17 +157,34 @@ pub async fn handle_sftp(
                 match std::fs::metadata(&target) {
                     Ok(meta) if meta.is_dir() => {
                         cwd = target.clone();
-                        sftp_send.write_all(&SftpResp::Ok {
-                            message: target.to_string_lossy().to_string(),
-                        }.encode()).await?;
+                        sftp_send
+                            .write_all(
+                                &SftpResp::Ok {
+                                    message: target.to_string_lossy().to_string(),
+                                }
+                                .encode(),
+                            )
+                            .await?;
                     }
                     Ok(_) => {
-                        sftp_send.write_all(&SftpResp::Error {
-                            message: format!("{}: not a directory", target.display()),
-                        }.encode()).await?;
+                        sftp_send
+                            .write_all(
+                                &SftpResp::Error {
+                                    message: format!("{}: not a directory", target.display()),
+                                }
+                                .encode(),
+                            )
+                            .await?;
                     }
                     Err(e) => {
-                        sftp_send.write_all(&SftpResp::Error { message: e.to_string() }.encode()).await?;
+                        sftp_send
+                            .write_all(
+                                &SftpResp::Error {
+                                    message: e.to_string(),
+                                }
+                                .encode(),
+                            )
+                            .await?;
                     }
                 }
             }
@@ -139,7 +209,9 @@ pub async fn handle_sftp(
                                 let mut buf = vec![0u8; RAW_CHUNK_SIZE];
                                 loop {
                                     let n = std::io::Read::read(&mut file, &mut buf)?;
-                                    if n == 0 { break; }
+                                    if n == 0 {
+                                        break;
+                                    }
                                     uni_send.write_all(&buf[..n]).await?;
                                 }
                                 uni_send.finish()?;
@@ -166,9 +238,14 @@ pub async fn handle_sftp(
                     Ok(mut uni_recv) => {
                         let mut type_buf = [0u8; 1];
                         if let Err(e) = uni_recv.read_exact(&mut type_buf).await {
-                            sftp_send.write_all(&SftpResp::Error {
-                                message: format!("put: {e}"),
-                            }.encode()).await?;
+                            sftp_send
+                                .write_all(
+                                    &SftpResp::Error {
+                                        message: format!("put: {e}"),
+                                    }
+                                    .encode(),
+                                )
+                                .await?;
                             continue;
                         }
 
@@ -176,32 +253,58 @@ pub async fn handle_sftp(
                             Ok(header) => {
                                 let target = resolve_path(&cwd, &home, &header.path);
                                 match super::file_handler::receive_raw_file(
-                                    &mut uni_recv, &target, header.size, header.mode,
-                                    header.mtime, header.atime,
-                                ).await {
+                                    &mut uni_recv,
+                                    &target,
+                                    header.size,
+                                    header.mode,
+                                    header.mtime,
+                                    header.atime,
+                                )
+                                .await
+                                {
                                     Ok(()) => {
-                                        sftp_send.write_all(&SftpResp::Ok {
-                                            message: format!("{} bytes", header.size),
-                                        }.encode()).await?;
+                                        sftp_send
+                                            .write_all(
+                                                &SftpResp::Ok {
+                                                    message: format!("{} bytes", header.size),
+                                                }
+                                                .encode(),
+                                            )
+                                            .await?;
                                     }
                                     Err(e) => {
-                                        sftp_send.write_all(&SftpResp::Error {
-                                            message: e.to_string(),
-                                        }.encode()).await?;
+                                        sftp_send
+                                            .write_all(
+                                                &SftpResp::Error {
+                                                    message: e.to_string(),
+                                                }
+                                                .encode(),
+                                            )
+                                            .await?;
                                     }
                                 }
                             }
                             Err(e) => {
-                                sftp_send.write_all(&SftpResp::Error {
-                                    message: format!("put header: {e}"),
-                                }.encode()).await?;
+                                sftp_send
+                                    .write_all(
+                                        &SftpResp::Error {
+                                            message: format!("put header: {e}"),
+                                        }
+                                        .encode(),
+                                    )
+                                    .await?;
                             }
                         }
                     }
                     Err(e) => {
-                        sftp_send.write_all(&SftpResp::Error {
-                            message: format!("put: {e}"),
-                        }.encode()).await?;
+                        sftp_send
+                            .write_all(
+                                &SftpResp::Error {
+                                    message: format!("put: {e}"),
+                                }
+                                .encode(),
+                            )
+                            .await?;
                     }
                 }
             }
@@ -248,9 +351,7 @@ fn list_dir(path: &Path) -> Result<Vec<ManifestEntry>, std::io::Error> {
         });
     }
 
-    entries.sort_by(|a, b| {
-        b.is_dir.cmp(&a.is_dir).then(a.path.cmp(&b.path))
-    });
+    entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then(a.path.cmp(&b.path)));
 
     Ok(entries)
 }

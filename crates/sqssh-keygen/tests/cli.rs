@@ -33,7 +33,10 @@ fn test_keygen_creates_keypair() {
     assert!(status.success());
 
     assert!(key_path.exists(), "private key should exist");
-    assert!(key_path.with_extension("pub").exists(), "public key should exist");
+    assert!(
+        key_path.with_extension("pub").exists(),
+        "public key should exist"
+    );
 
     let content = std::fs::read_to_string(&key_path).unwrap();
     assert!(content.starts_with("SQSSH-ED25519-PRIVATE-KEY"));

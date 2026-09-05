@@ -9,19 +9,13 @@ use sqssh_core::protocol::ShellControlMsg;
 use tokio::io::unix::AsyncFd;
 
 /// Look up a system user by name. Returns (uid, gid, home, shell).
-pub fn lookup_user(username: &str) -> Result<(u32, u32, String, String), Box<dyn std::error::Error + Send + Sync>> {
+pub fn lookup_user(
+    username: &str,
+) -> Result<(u32, u32, String, String), Box<dyn std::error::Error + Send + Sync>> {
     let user = nix::unistd::User::from_name(username)?
         .ok_or_else(|| format!("user '{username}' not found"))?;
-    let shell = user
-        .shell
-        .to_str()
-        .unwrap_or("/bin/sh")
-        .to_string();
-    let home = user
-        .dir
-        .to_str()
-        .unwrap_or("/")
-        .to_string();
+    let shell = user.shell.to_str().unwrap_or("/bin/sh").to_string();
+    let home = user.dir.to_str().unwrap_or("/").to_string();
     Ok((user.uid.as_raw(), user.gid.as_raw(), home, shell))
 }
 
@@ -32,9 +26,8 @@ unsafe fn switch_user(uid: u32, gid: u32, username: &str) -> std::io::Result<()>
         return Err(std::io::Error::last_os_error());
     }
     // initgroups
-    let c_username = std::ffi::CString::new(username).map_err(|_| {
-        std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid username")
-    })?;
+    let c_username = std::ffi::CString::new(username)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid username"))?;
     // On macOS initgroups takes c_int, on Linux it takes gid_t (u32)
     #[cfg(target_os = "macos")]
     let group_arg = gid as libc::c_int;
@@ -78,22 +71,26 @@ pub async fn run_raw_exec(
     // Send stderr on a separate uni stream
     if !output.stderr.is_empty() {
         if let Ok(mut stderr_send) = conn.open_uni().await {
-            stderr_send.write_all(&[sqssh_core::protocol::RAW_EXEC_STDERR]).await.ok();
+            stderr_send
+                .write_all(&[sqssh_core::protocol::RAW_EXEC_STDERR])
+                .await
+                .ok();
             stderr_send.write_all(&output.stderr).await.ok();
             stderr_send.finish().ok();
         }
     }
 
     // Send stdout on bidi send half
-    send.write_all(&output.stdout).await
+    send.write_all(&output.stdout)
+        .await
         .map_err(|e| format!("exec stdout write: {e}"))?;
 
     // Write exit code as last 4 bytes, then finish
     let code = output.status.code().unwrap_or(1) as u32;
-    send.write_all(&code.to_be_bytes()).await
+    send.write_all(&code.to_be_bytes())
+        .await
         .map_err(|e| format!("exec exit code write: {e}"))?;
-    send.finish()
-        .map_err(|e| format!("exec finish: {e}"))?;
+    send.finish().map_err(|e| format!("exec finish: {e}"))?;
 
     Ok(())
 }
@@ -116,8 +113,8 @@ fn get_and_update_lastlog(uid: u32, remote_host: &str) -> Option<String> {
         #[repr(C)]
         #[derive(Clone, Copy)]
         struct Lastlog {
-            ll_time: i64,      // time_t on x86_64 Linux
-            ll_line: [u8; 32], // UT_LINESIZE
+            ll_time: i64,       // time_t on x86_64 Linux
+            ll_line: [u8; 32],  // UT_LINESIZE
             ll_host: [u8; 256], // UT_HOSTSIZE
         }
 
@@ -134,10 +131,7 @@ fn get_and_update_lastlog(uid: u32, remote_host: &str) -> Option<String> {
         let mut old: Lastlog = unsafe { std::mem::zeroed() };
         file.seek(SeekFrom::Start(offset)).ok()?;
         let buf = unsafe {
-            std::slice::from_raw_parts_mut(
-                &mut old as *mut Lastlog as *mut u8,
-                entry_size,
-            )
+            std::slice::from_raw_parts_mut(&mut old as *mut Lastlog as *mut u8, entry_size)
         };
         let _ = file.read(buf);
 
@@ -186,10 +180,7 @@ fn get_and_update_lastlog(uid: u32, remote_host: &str) -> Option<String> {
 
         let _ = file.seek(SeekFrom::Start(offset));
         let buf = unsafe {
-            std::slice::from_raw_parts(
-                &new_entry as *const Lastlog as *const u8,
-                entry_size,
-            )
+            std::slice::from_raw_parts(&new_entry as *const Lastlog as *const u8, entry_size)
         };
         let _ = file.write_all(buf);
 
@@ -242,7 +233,9 @@ pub async fn run_raw_shell(
 
     // Send banner, last login, and MOTD as raw bytes on data stream
     if let Some(ref content) = banner {
-        data_send.write_all(content.replace('\n', "\r\n").as_bytes()).await?;
+        data_send
+            .write_all(content.replace('\n', "\r\n").as_bytes())
+            .await?;
     }
     if !has_hushlogin(&home) {
         if print_last_log {
@@ -390,7 +383,9 @@ pub async fn run_raw_shell(
     // Wait for child and send exit status on control stream
     let status = child.wait()?;
     let code = status.code().unwrap_or(1) as u32;
-    let _ = ctrl_send.write_all(&ShellControlMsg::ExitStatus { code }.encode()).await;
+    let _ = ctrl_send
+        .write_all(&ShellControlMsg::ExitStatus { code }.encode())
+        .await;
     let _ = ctrl_send.write_all(&ShellControlMsg::Eof.encode()).await;
     let _ = data_send.finish();
 
@@ -509,7 +504,9 @@ pub async fn resume_raw_shell(
         0
     };
 
-    let _ = ctrl_send.write_all(&ShellControlMsg::ExitStatus { code }.encode()).await;
+    let _ = ctrl_send
+        .write_all(&ShellControlMsg::ExitStatus { code }.encode())
+        .await;
     let _ = ctrl_send.write_all(&ShellControlMsg::Eof.encode()).await;
     let _ = data_send.finish();
 

@@ -62,12 +62,14 @@ fn agent_socket() -> Result<PathBuf, Box<dyn std::error::Error>> {
     Ok(sqssh_dir.join("agent.sock"))
 }
 
-fn send_request(
-    request: &AgentRequest,
-) -> Result<AgentResponse, Box<dyn std::error::Error>> {
+fn send_request(request: &AgentRequest) -> Result<AgentResponse, Box<dyn std::error::Error>> {
     let socket_path = agent_socket()?;
-    let mut stream = UnixStream::connect(&socket_path)
-        .map_err(|e| format!("could not connect to agent at {}: {e}", socket_path.display()))?;
+    let mut stream = UnixStream::connect(&socket_path).map_err(|e| {
+        format!(
+            "could not connect to agent at {}: {e}",
+            socket_path.display()
+        )
+    })?;
 
     let data = request.encode();
     stream.write_all(&data)?;

@@ -7,8 +7,8 @@ use std::time::Instant;
 use clap::Parser;
 use sqssh_core::client;
 use sqssh_core::protocol::{
-    self, RawChunkHeader, RawFileHeader, RAW_CHUNK_SIZE,
-    RAW_DOWNLOAD_CHUNK, RAW_DOWNLOAD_DATA, RAW_MANIFEST_RESPONSE, RAW_TRANSFER_RESULT,
+    self, RawChunkHeader, RawFileHeader, RAW_CHUNK_SIZE, RAW_DOWNLOAD_CHUNK, RAW_DOWNLOAD_DATA,
+    RAW_MANIFEST_RESPONSE, RAW_TRANSFER_RESULT,
 };
 use tokio::sync::Semaphore;
 
@@ -235,7 +235,11 @@ async fn upload(
     // How many uni streams this upload will open, which is what the sync
     // request below has to report: one per job when chunking a single file,
     // otherwise one per file.
-    let uni_streams_opened = if files_total == 1 && jobs > 1 { jobs } else { files_total };
+    let uni_streams_opened = if files_total == 1 && jobs > 1 {
+        jobs
+    } else {
+        files_total
+    };
     if files_total == 1 && jobs > 1 {
         let (local_path, rel_name) = files.into_iter().next().unwrap();
         let upload_path = if is_dir_dest {
@@ -244,7 +248,17 @@ async fn upload(
             remote_path.clone()
         };
 
-        upload_file_chunked(&conn, &local_path, &upload_path, &rel_name, preserve, bw_limit, jobs, &progress).await?;
+        upload_file_chunked(
+            &conn,
+            &local_path,
+            &upload_path,
+            &rel_name,
+            preserve,
+            bw_limit,
+            jobs,
+            &progress,
+        )
+        .await?;
         progress.file_done(&rel_name);
     } else {
         for (local_path, rel_name) in files.into_iter() {
@@ -263,7 +277,16 @@ async fn upload(
                     dest.clone()
                 };
 
-                upload_file_raw(&conn, &local_path, &upload_path, &rel_name, preserve, bw_limit, &progress).await?;
+                upload_file_raw(
+                    &conn,
+                    &local_path,
+                    &upload_path,
+                    &rel_name,
+                    preserve,
+                    bw_limit,
+                    &progress,
+                )
+                .await?;
                 progress.file_done(&rel_name);
 
                 Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
@@ -296,8 +319,13 @@ async fn upload(
     let stream_count = uni_streams_opened as u32;
     let mut sync_msg = vec![0xFE];
     sync_msg.extend_from_slice(&stream_count.to_be_bytes());
-    sync_send.write_all(&sync_msg).await.map_err(|e| format!("sync write: {e}"))?;
-    sync_send.finish().map_err(|e| format!("sync finish: {e}"))?;
+    sync_send
+        .write_all(&sync_msg)
+        .await
+        .map_err(|e| format!("sync write: {e}"))?;
+    sync_send
+        .finish()
+        .map_err(|e| format!("sync finish: {e}"))?;
     let mut buf = [0u8; 1];
     let _ = sync_recv.read_exact(&mut buf).await; // wait for server ack
 
@@ -343,8 +371,6 @@ async fn upload_file_raw(
     bw_limit_kbps: u64,
     progress: &Progress,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-
-
     let meta = std::fs::metadata(local_path)?;
     let size = meta.len();
     let mode = meta.mode();
@@ -355,7 +381,9 @@ async fn upload_file_raw(
     };
 
     // Open unidirectional stream
-    let mut send: quinn::SendStream = conn.open_uni().await
+    let mut send: quinn::SendStream = conn
+        .open_uni()
+        .await
         .map_err(|e| format!("failed to open upload stream: {e}"))?;
 
     // Write binary header
@@ -366,7 +394,8 @@ async fn upload_file_raw(
         mtime,
         atime,
     };
-    send.write_all(&header.encode_upload()).await
+    send.write_all(&header.encode_upload())
+        .await
         .map_err(|e| format!("failed to write header: {e}"))?;
 
     // Stream raw file data
@@ -386,7 +415,8 @@ async fn upload_file_raw(
         if n == 0 {
             break;
         }
-        send.write_all(&buf[..n]).await
+        send.write_all(&buf[..n])
+            .await
             .map_err(|e| format!("write error: {e}"))?;
 
         progress.add_transferred(n as u64);
@@ -405,8 +435,7 @@ async fn upload_file_raw(
     }
 
     // FIN = EOF, then wait for peer to process all data
-    send.finish()
-        .map_err(|e| format!("finish error: {e}"))?;
+    send.finish().map_err(|e| format!("finish error: {e}"))?;
 
     Ok(())
 }
@@ -452,7 +481,9 @@ async fn upload_file_chunked(
         };
 
         let handle = tokio::spawn(async move {
-            let mut send: quinn::SendStream = conn.open_uni().await
+            let mut send: quinn::SendStream = conn
+                .open_uni()
+                .await
                 .map_err(|e| format!("failed to open chunk stream: {e}"))?;
 
             let header = RawChunkHeader {
@@ -464,7 +495,8 @@ async fn upload_file_chunked(
                 offset,
                 chunk_length: length,
             };
-            send.write_all(&header.encode_upload()).await
+            send.write_all(&header.encode_upload())
+                .await
                 .map_err(|e| format!("chunk header write: {e}"))?;
 
             // Read from file at offset using pread
@@ -480,11 +512,15 @@ async fn upload_file_chunked(
 
             while sent < length {
                 let to_read = std::cmp::min(RAW_CHUNK_SIZE as u64, length - sent) as usize;
-                let n = file.read_at(&mut buf[..to_read], offset + sent)
+                let n = file
+                    .read_at(&mut buf[..to_read], offset + sent)
                     .map_err(|e| format!("read_at error: {e}"))?;
-                if n == 0 { break; }
+                if n == 0 {
+                    break;
+                }
 
-                send.write_all(&buf[..n]).await
+                send.write_all(&buf[..n])
+                    .await
                     .map_err(|e| format!("chunk write: {e}"))?;
                 sent += n as u64;
                 progress.add_transferred(n as u64);
@@ -494,7 +530,8 @@ async fn upload_file_chunked(
                     if sent_this_tick >= bytes_per_tick {
                         let elapsed = tick_start.elapsed();
                         if elapsed < std::time::Duration::from_millis(100) {
-                            tokio::time::sleep(std::time::Duration::from_millis(100) - elapsed).await;
+                            tokio::time::sleep(std::time::Duration::from_millis(100) - elapsed)
+                                .await;
                         }
                         sent_this_tick = 0;
                         tick_start = Instant::now();
@@ -536,7 +573,9 @@ async fn download(
     let conn = Arc::new(conn.conn);
 
     // Open raw bidi stream: [RAW_DOWNLOAD_REQUEST][2 bytes path_len][path][4 bytes jobs]
-    let (mut dl_send, mut dl_recv) = conn.open_bi().await
+    let (mut dl_send, mut dl_recv) = conn
+        .open_bi()
+        .await
         .map_err(|e| format!("failed to open download stream: {e}"))?;
     let path_bytes = remote_path.as_bytes();
     let mut header = Vec::with_capacity(1 + 2 + path_bytes.len() + 4);
@@ -544,12 +583,16 @@ async fn download(
     header.extend_from_slice(&(path_bytes.len() as u16).to_be_bytes());
     header.extend_from_slice(path_bytes);
     header.extend_from_slice(&(cli.jobs as u32).to_be_bytes());
-    dl_send.write_all(&header).await
+    dl_send
+        .write_all(&header)
+        .await
         .map_err(|e| format!("failed to write download request: {e}"))?;
 
     // Read response type from server
     let mut type_buf = [0u8; 1];
-    dl_recv.read_exact(&mut type_buf).await
+    dl_recv
+        .read_exact(&mut type_buf)
+        .await
         .map_err(|e| format!("failed to read response type: {e}"))?;
 
     match type_buf[0] {
@@ -591,12 +634,15 @@ async fn download(
             let mut received = 0;
 
             while received < total_files {
-                let mut recv = conn.accept_uni().await
+                let mut recv = conn
+                    .accept_uni()
+                    .await
                     .map_err(|e| format!("failed to accept download stream: {e}"))?;
 
                 // Read type byte
                 let mut tb = [0u8; 1];
-                recv.read_exact(&mut tb).await
+                recv.read_exact(&mut tb)
+                    .await
                     .map_err(|e| format!("failed to read stream type: {e}"))?;
 
                 if tb[0] != RAW_DOWNLOAD_DATA {
@@ -616,7 +662,15 @@ async fn download(
                         std::fs::create_dir_all(parent).ok();
                     }
 
-                    download_file_raw(&mut recv, &local_path, &header, preserve, bw_limit, &progress).await?;
+                    download_file_raw(
+                        &mut recv,
+                        &local_path,
+                        &header,
+                        preserve,
+                        bw_limit,
+                        &progress,
+                    )
+                    .await?;
                     progress.file_done(&file_path);
 
                     Ok::<(), Box<dyn std::error::Error + Send + Sync>>(())
@@ -651,11 +705,14 @@ async fn download(
         }
         RAW_DOWNLOAD_DATA => {
             // Single file, single stream
-            let mut recv = conn.accept_uni().await
+            let mut recv = conn
+                .accept_uni()
+                .await
                 .map_err(|e| format!("failed to accept download stream: {e}"))?;
 
             let mut tb = [0u8; 1];
-            recv.read_exact(&mut tb).await
+            recv.read_exact(&mut tb)
+                .await
                 .map_err(|e| format!("failed to read stream type: {e}"))?;
 
             let header = RawFileHeader::decode(&mut recv).await?;
@@ -668,7 +725,15 @@ async fn download(
 
             let progress = Progress::new(1, cli.quiet);
             progress.set_total_bytes(header.size);
-            download_file_raw(&mut recv, &dest, &header, cli.preserve, cli.limit, &progress).await?;
+            download_file_raw(
+                &mut recv,
+                &dest,
+                &header,
+                cli.preserve,
+                cli.limit,
+                &progress,
+            )
+            .await?;
             progress.file_done(&header.path);
 
             if !cli.quiet {
@@ -711,11 +776,14 @@ async fn download(
                 let preserve = cli.preserve;
 
                 let handle = tokio::spawn(async move {
-                    let mut recv = conn.accept_uni().await
+                    let mut recv = conn
+                        .accept_uni()
+                        .await
                         .map_err(|e| format!("failed to accept chunk stream: {e}"))?;
 
                     let mut tb = [0u8; 1];
-                    recv.read_exact(&mut tb).await
+                    recv.read_exact(&mut tb)
+                        .await
                         .map_err(|e| format!("chunk type: {e}"))?;
 
                     let chunk = RawChunkHeader::decode(&mut recv).await?;
@@ -723,9 +791,12 @@ async fn download(
                     // Write at offset using pwrite
                     download_chunk_raw(&mut recv, &file, &chunk, &progress).await?;
 
-                    Ok::<(u32, u64, u64, bool), Box<dyn std::error::Error + Send + Sync>>(
-                        (chunk.mode, chunk.mtime, chunk.atime, preserve)
-                    )
+                    Ok::<(u32, u64, u64, bool), Box<dyn std::error::Error + Send + Sync>>((
+                        chunk.mode,
+                        chunk.mtime,
+                        chunk.atime,
+                        preserve,
+                    ))
                 });
 
                 handles.push(handle);

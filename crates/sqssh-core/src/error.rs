@@ -53,7 +53,8 @@ pub fn format_connection_error(err: &str) -> String {
              - server may not be running (sqsshd)\n  \
              - host may be unreachable or firewalled\n  \
              - wrong port (default: 22/UDP)\n  \
-             - your key is not in the server's whitelist (silent drop)".to_string()
+             - your key is not in the server's whitelist (silent drop)"
+            .to_string()
     } else if msg.contains("connection refused") {
         "connection refused\n  \
          - no service listening on that port"
@@ -64,7 +65,8 @@ pub fn format_connection_error(err: &str) -> String {
             .to_string()
     } else if msg.contains("dns") || msg.contains("resolve") {
         "DNS resolution failed\n  \
-                 - hostname could not be resolved — check spelling".to_string()
+                 - hostname could not be resolved — check spelling"
+            .to_string()
     } else {
         err.to_string()
     }

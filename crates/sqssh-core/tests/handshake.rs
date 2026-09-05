@@ -50,7 +50,9 @@ fn client_config(text: &str, host: &str, seed: &[u8; 32]) -> squic::Config {
 async fn listen(cfg: squic::Config) -> (squic::ServerListener, SocketAddr, [u8; 32]) {
     let (signing_key, public) = squic::generate_keypair();
     let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
-    let listener = squic::listen(addr, &signing_key, cfg).await.expect("listen");
+    let listener = squic::listen(addr, &signing_key, cfg)
+        .await
+        .expect("listen");
     let bound = listener.local_addr().expect("local_addr");
     (listener, bound, public)
 }

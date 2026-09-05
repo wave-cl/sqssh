@@ -41,11 +41,7 @@ pub fn send_fds(socket: &UnixStream, fds: &[RawFd], data: &[u8]) -> io::Result<(
         (*cmsg).cmsg_level = libc::SOL_SOCKET;
         (*cmsg).cmsg_type = libc::SCM_RIGHTS;
         (*cmsg).cmsg_len = libc::CMSG_LEN(std::mem::size_of_val(fds) as u32) as _;
-        std::ptr::copy_nonoverlapping(
-            fd_bytes.as_ptr(),
-            libc::CMSG_DATA(cmsg),
-            fd_bytes.len(),
-        );
+        std::ptr::copy_nonoverlapping(fd_bytes.as_ptr(), libc::CMSG_DATA(cmsg), fd_bytes.len());
     }
 
     let ret = unsafe { libc::sendmsg(socket.as_raw_fd(), &msg, 0) };
@@ -61,9 +57,8 @@ pub fn send_fds(socket: &UnixStream, fds: &[RawFd], data: &[u8]) -> io::Result<(
 pub fn recv_fds(socket: &UnixStream, max_fds: usize) -> io::Result<(Vec<RawFd>, Vec<u8>)> {
     use std::os::unix::io::AsRawFd;
 
-    let cmsg_space = unsafe {
-        libc::CMSG_SPACE((max_fds * std::mem::size_of::<RawFd>()) as u32)
-    } as usize;
+    let cmsg_space =
+        unsafe { libc::CMSG_SPACE((max_fds * std::mem::size_of::<RawFd>()) as u32) } as usize;
 
     let mut cmsg_buf = vec![0u8; cmsg_space];
     let mut data_buf = vec![0u8; 65536]; // max data payload
@@ -94,8 +89,7 @@ pub fn recv_fds(socket: &UnixStream, max_fds: usize) -> io::Result<(Vec<RawFd>, 
         unsafe {
             if (*cmsg).cmsg_level == libc::SOL_SOCKET && (*cmsg).cmsg_type == libc::SCM_RIGHTS {
                 let fd_data = libc::CMSG_DATA(cmsg);
-                let fd_len = (*cmsg).cmsg_len as usize
-                    - libc::CMSG_LEN(0) as usize;
+                let fd_len = (*cmsg).cmsg_len as usize - libc::CMSG_LEN(0) as usize;
                 let num_fds = fd_len / std::mem::size_of::<RawFd>();
 
                 for i in 0..num_fds {

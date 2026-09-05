@@ -27,7 +27,8 @@ struct EncryptedKeyBlob {
 
 impl EncryptedKeyBlob {
     fn encode(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(12 + self.salt.len() + self.nonce.len() + self.ciphertext.len());
+        let mut buf =
+            Vec::with_capacity(12 + self.salt.len() + self.nonce.len() + self.ciphertext.len());
         buf.extend_from_slice(&self.m_cost.to_be_bytes());
         buf.extend_from_slice(&self.t_cost.to_be_bytes());
         buf.extend_from_slice(&self.p_cost.to_be_bytes());
@@ -48,7 +49,14 @@ impl EncryptedKeyBlob {
         let salt = data[12..28].to_vec();
         let nonce = data[28..40].to_vec();
         let ciphertext = data[40..].to_vec();
-        Ok(Self { m_cost, t_cost, p_cost, salt, nonce, ciphertext })
+        Ok(Self {
+            m_cost,
+            t_cost,
+            p_cost,
+            salt,
+            nonce,
+            ciphertext,
+        })
     }
 }
 
@@ -173,8 +181,7 @@ fn encrypt_seed(seed: &[u8; 32], passphrase: &str) -> Result<String> {
 /// Decrypt an encrypted key blob with a passphrase.
 fn decrypt_seed(encrypted_b58: &str, passphrase: &str) -> Result<SigningKey> {
     let encoded = bs58::decode(encrypted_b58).into_vec()?;
-    let blob = EncryptedKeyBlob::decode(&encoded)
-        .map_err(Error::InvalidKeyFormat)?;
+    let blob = EncryptedKeyBlob::decode(&encoded).map_err(Error::InvalidKeyFormat)?;
 
     if blob.salt.len() != 16 || blob.nonce.len() != 12 {
         return Err(Error::InvalidKeyFormat("invalid encrypted key blob".into()));
@@ -201,7 +208,9 @@ fn decrypt_seed(encrypted_b58: &str, passphrase: &str) -> Result<SigningKey> {
         .map_err(|_| Error::Key("decryption failed (wrong passphrase?)".into()))?;
 
     if seed.len() != 32 {
-        return Err(Error::InvalidKeyFormat("decrypted seed is not 32 bytes".into()));
+        return Err(Error::InvalidKeyFormat(
+            "decrypted seed is not 32 bytes".into(),
+        ));
     }
 
     let mut arr = [0u8; 32];
@@ -226,8 +235,11 @@ pub fn prompt_passphrase(prompt: &str) -> Result<Zeroizing<String>> {
         let orig = nix::sys::termios::tcgetattr(stdin_fd).ok();
         if let Some(ref o) = orig {
             let mut noecho = o.clone();
-            noecho.local_flags.remove(nix::sys::termios::LocalFlags::ECHO);
-            nix::sys::termios::tcsetattr(stdin_fd, nix::sys::termios::SetArg::TCSANOW, &noecho).ok();
+            noecho
+                .local_flags
+                .remove(nix::sys::termios::LocalFlags::ECHO);
+            nix::sys::termios::tcsetattr(stdin_fd, nix::sys::termios::SetArg::TCSANOW, &noecho)
+                .ok();
         }
         orig
     } else {
@@ -272,10 +284,7 @@ pub fn load_private_key(path: &Path) -> Result<SigningKey> {
         .trim();
 
     if header == ENCRYPTED_KEY_HEADER {
-        let passphrase = prompt_passphrase(&format!(
-            "Enter passphrase for {}: ",
-            path.display()
-        ))?;
+        let passphrase = prompt_passphrase(&format!("Enter passphrase for {}: ", path.display()))?;
         decrypt_seed(data_line, &passphrase)
     } else if header == PRIVATE_KEY_HEADER {
         decode_private_key(data_line)

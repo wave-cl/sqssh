@@ -57,11 +57,7 @@ impl KnownHosts {
 
     /// Add a host entry. If the host already exists, update its key.
     pub fn add(&mut self, hostname: &str, pubkey: VerifyingKey, comment: &str) {
-        if let Some(entry) = self
-            .entries
-            .iter_mut()
-            .find(|e| e.pattern == hostname)
-        {
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.pattern == hostname) {
             entry.pubkey = pubkey;
             entry.comment = comment.to_string();
         } else {

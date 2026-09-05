@@ -53,26 +53,35 @@ impl PersistPayload {
         let mut pos = 0;
 
         let read_u16 = |data: &[u8], pos: &mut usize| -> Result<u16, String> {
-            if *pos + 2 > data.len() { return Err("truncated".into()); }
+            if *pos + 2 > data.len() {
+                return Err("truncated".into());
+            }
             let v = u16::from_be_bytes([data[*pos], data[*pos + 1]]);
             *pos += 2;
             Ok(v)
         };
         let read_u32 = |data: &[u8], pos: &mut usize| -> Result<u32, String> {
-            if *pos + 4 > data.len() { return Err("truncated".into()); }
-            let v = u32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]]);
+            if *pos + 4 > data.len() {
+                return Err("truncated".into());
+            }
+            let v =
+                u32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]]);
             *pos += 4;
             Ok(v)
         };
         let read_str = |data: &[u8], pos: &mut usize, len: usize| -> Result<String, String> {
-            if *pos + len > data.len() { return Err("truncated".into()); }
+            if *pos + len > data.len() {
+                return Err("truncated".into());
+            }
             let s = String::from_utf8(data[*pos..*pos + len].to_vec())
                 .map_err(|_| "invalid UTF-8".to_string())?;
             *pos += len;
             Ok(s)
         };
         let read_bytes = |data: &[u8], pos: &mut usize, len: usize| -> Result<Vec<u8>, String> {
-            if *pos + len > data.len() { return Err("truncated".into()); }
+            if *pos + len > data.len() {
+                return Err("truncated".into());
+            }
             let b = data[*pos..*pos + len].to_vec();
             *pos += len;
             Ok(b)

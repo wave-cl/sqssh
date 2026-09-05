@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 
 use clap::Parser;
 use sqssh_core::client;
-use sqssh_core::protocol::{ManifestEntry, RawFileHeader, SftpCmd, SftpResp, RAW_SFTP, RAW_CHUNK_SIZE};
+use sqssh_core::protocol::{
+    ManifestEntry, RawFileHeader, SftpCmd, SftpResp, RAW_CHUNK_SIZE, RAW_SFTP,
+};
 
 #[derive(Parser)]
 #[command(name = "sqsftp", about = "sqssh interactive file transfer", version)]
@@ -77,14 +79,22 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     sftp_send.write_all(&[RAW_SFTP]).await?;
 
     // Get initial remote cwd
-    sftp_send.write_all(&SftpCmd::Realpath { path: ".".to_string() }.encode()).await?;
+    sftp_send
+        .write_all(
+            &SftpCmd::Realpath {
+                path: ".".to_string(),
+            }
+            .encode(),
+        )
+        .await?;
     let mut remote_cwd = match SftpResp::decode(&mut sftp_recv).await? {
         SftpResp::Ok { message } => message,
         _ => "~".to_string(),
     };
 
     // Set up input source: batch file or stdin
-    let batch_input: Option<io::BufReader<std::fs::File>> = if let Some(ref batch_path) = cli.batch {
+    let batch_input: Option<io::BufReader<std::fs::File>> = if let Some(ref batch_path) = cli.batch
+    {
         let file = std::fs::File::open(batch_path)
             .map_err(|e| format!("cannot open batch file {}: {e}", batch_path.display()))?;
         Some(io::BufReader::new(file))
@@ -148,12 +158,10 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 println!("{remote_cwd}");
             }
 
-            "lpwd" => {
-                match std::env::current_dir() {
-                    Ok(p) => println!("{}", p.display()),
-                    Err(e) => eprintln!("lpwd: {e}"),
-                }
-            }
+            "lpwd" => match std::env::current_dir() {
+                Ok(p) => println!("{}", p.display()),
+                Err(e) => eprintln!("lpwd: {e}"),
+            },
 
             "lcd" => {
                 if arg1.is_empty() {
@@ -185,7 +193,14 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
             "ls" => {
                 let path = if arg1.is_empty() { "." } else { arg1 };
-                sftp_send.write_all(&SftpCmd::ListDir { path: path.to_string() }.encode()).await?;
+                sftp_send
+                    .write_all(
+                        &SftpCmd::ListDir {
+                            path: path.to_string(),
+                        }
+                        .encode(),
+                    )
+                    .await?;
                 match SftpResp::decode(&mut sftp_recv).await? {
                     SftpResp::DirListing { entries } => print_listing(&entries),
                     SftpResp::Error { message } => eprintln!("ls: {message}"),
@@ -197,7 +212,14 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 if arg1.is_empty() {
                     eprintln!("cd: missing path");
                 } else {
-                    sftp_send.write_all(&SftpCmd::Realpath { path: arg1.to_string() }.encode()).await?;
+                    sftp_send
+                        .write_all(
+                            &SftpCmd::Realpath {
+                                path: arg1.to_string(),
+                            }
+                            .encode(),
+                        )
+                        .await?;
                     match SftpResp::decode(&mut sftp_recv).await? {
                         SftpResp::Ok { message } => remote_cwd = message,
                         SftpResp::Error { message } => eprintln!("cd: {message}"),
@@ -210,9 +232,23 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 if arg1.is_empty() {
                     eprintln!("stat: missing path");
                 } else {
-                    sftp_send.write_all(&SftpCmd::Stat { path: arg1.to_string() }.encode()).await?;
+                    sftp_send
+                        .write_all(
+                            &SftpCmd::Stat {
+                                path: arg1.to_string(),
+                            }
+                            .encode(),
+                        )
+                        .await?;
                     match SftpResp::decode(&mut sftp_recv).await? {
-                        SftpResp::StatResult { path, size, mode, mtime, is_dir, .. } => {
+                        SftpResp::StatResult {
+                            path,
+                            size,
+                            mode,
+                            mtime,
+                            is_dir,
+                            ..
+                        } => {
                             println!("  Path: {path}");
                             println!("  Type: {}", if is_dir { "directory" } else { "file" });
                             println!("  Size: {}", format_size(size));
@@ -231,7 +267,15 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 if arg1.is_empty() {
                     eprintln!("mkdir: missing path");
                 } else {
-                    sftp_send.write_all(&SftpCmd::Mkdir { path: arg1.to_string(), mode: 0o755 }.encode()).await?;
+                    sftp_send
+                        .write_all(
+                            &SftpCmd::Mkdir {
+                                path: arg1.to_string(),
+                                mode: 0o755,
+                            }
+                            .encode(),
+                        )
+                        .await?;
                     match SftpResp::decode(&mut sftp_recv).await? {
                         SftpResp::Ok { .. } => {}
                         SftpResp::Error { message } => eprintln!("mkdir: {message}"),
@@ -244,7 +288,14 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 if arg1.is_empty() {
                     eprintln!("rm: missing path");
                 } else {
-                    sftp_send.write_all(&SftpCmd::Remove { path: arg1.to_string() }.encode()).await?;
+                    sftp_send
+                        .write_all(
+                            &SftpCmd::Remove {
+                                path: arg1.to_string(),
+                            }
+                            .encode(),
+                        )
+                        .await?;
                     match SftpResp::decode(&mut sftp_recv).await? {
                         SftpResp::Ok { .. } => {}
                         SftpResp::Error { message } => eprintln!("rm: {message}"),
@@ -257,10 +308,15 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 if arg1.is_empty() || arg2.is_empty() {
                     eprintln!("rename: usage: rename old new");
                 } else {
-                    sftp_send.write_all(&SftpCmd::Rename {
-                        old_path: arg1.to_string(),
-                        new_path: arg2.to_string(),
-                    }.encode()).await?;
+                    sftp_send
+                        .write_all(
+                            &SftpCmd::Rename {
+                                old_path: arg1.to_string(),
+                                new_path: arg2.to_string(),
+                            }
+                            .encode(),
+                        )
+                        .await?;
                     match SftpResp::decode(&mut sftp_recv).await? {
                         SftpResp::Ok { .. } => {}
                         SftpResp::Error { message } => eprintln!("rename: {message}"),
@@ -288,7 +344,14 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     };
 
                     // Send get command on SFTP control stream
-                    sftp_send.write_all(&SftpCmd::Get { path: remote_file.clone() }.encode()).await?;
+                    sftp_send
+                        .write_all(
+                            &SftpCmd::Get {
+                                path: remote_file.clone(),
+                            }
+                            .encode(),
+                        )
+                        .await?;
 
                     // Server sends file on a uni stream
                     match conn.accept_uni().await {
@@ -363,7 +426,9 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     let mut buf = vec![0u8; RAW_CHUNK_SIZE];
                     loop {
                         let n = std::io::Read::read(&mut file, &mut buf)?;
-                        if n == 0 { break; }
+                        if n == 0 {
+                            break;
+                        }
                         uni_send.write_all(&buf[..n]).await?;
                     }
                     uni_send.finish()?;
