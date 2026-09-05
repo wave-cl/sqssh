@@ -113,7 +113,13 @@ run "empty whitelist drops" "whitelist+user" "connection timed out"
 # this case from a guard into a red tick nobody read: a default v3 client
 # cannot reach a v2-only server, and it is right not to. Narrowing the server
 # to the *current* default is what keeps the original regression caught.
-run "default client reaches a v3-only server" "open+user" "authentication failed" \
-  "AcceptedEnvelopeVersions 3"
+#
+# Now 4, for squic v0.24.0's envelope v4. This case failed the cut rather than
+# sleeping through it, which is the behaviour the paragraph above was asking
+# for: left at 3 it went red immediately, because a v4 client cannot reach a
+# v3-only server and a refused envelope draws no reply at all — the client
+# reports a timeout, not a rejection.
+run "default client reaches a v4-only server" "open+user" "authentication failed" \
+  "AcceptedEnvelopeVersions 4"
 echo "=== pass=$pass fail=$fail ==="
 exit "$fail"
