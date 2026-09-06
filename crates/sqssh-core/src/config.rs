@@ -146,6 +146,34 @@ impl ClientConfig {
 
         resolved
     }
+
+    /// `resolve`, with `-o key=value` overrides applied on top.
+    ///
+    /// Overrides win over both the matched `Host` blocks and the defaults,
+    /// which is the whole point of passing one: it is the thing the caller
+    /// typed just now, against a config written earlier. They apply whether or
+    /// not any `Host` block matched, so `-o hostkey=...` works for a bare
+    /// address that appears nowhere in the config — the case it is most wanted
+    /// for, and the one that did nothing at all before, because `-o` was
+    /// parsed into a `Vec<String>` that nothing ever read.
+    pub fn resolve_with(&self, hostname: &str, overrides: &[String]) -> Result<ResolvedConfig> {
+        let mut resolved = self.resolve(hostname);
+        if overrides.is_empty() {
+            return Ok(resolved);
+        }
+        let mut over = HostConfig::default();
+        for o in overrides {
+            let (key, value) = o
+                .split_once('=')
+                .ok_or_else(|| Error::Config(format!("-o expects key=value, got {o:?}")))?;
+            apply_directive(&mut over, key.trim(), value.trim())?;
+        }
+        resolved.merge(&over);
+        if resolved.hostname.is_none() {
+            resolved.hostname = Some(hostname.to_string());
+        }
+        Ok(resolved)
+    }
 }
 
 /// Fully resolved configuration for a specific connection.
@@ -592,6 +620,68 @@ mod tests {
         // squic moved to 3.
         assert_eq!(cfg.resolve("old").envelope_version, None);
         assert_eq!(cfg.resolve("unmentioned").envelope_version, None);
+    }
+
+    /// `-o` must reach the connection. It was parsed into a `Vec<String>`
+    /// that nothing read, so every override was accepted and discarded —
+    /// silently, which is the worst way for an option to not work.
+    #[test]
+    fn an_override_wins_and_applies_without_a_matching_host() {
+        let cfg = ClientConfig::parse("Host ex\n    User root\n    Port 2222\n").expect("parses");
+
+        // Beats a Host block that says otherwise.
+        let r = cfg
+            .resolve_with("ex", &["user=alice".into()])
+            .expect("applies");
+        assert_eq!(r.user.as_deref(), Some("alice"));
+        assert_eq!(r.port, 2222, "untouched settings survive");
+
+        // And applies where no Host block matches at all — the bare-address
+        // case, which is the one an override is most often typed for.
+        let r = cfg
+            .resolve_with(
+                "10.0.0.1",
+                &["hostkey=AyEsg3CzX34Yn1PRQu8LsNYVHQiYb7u585ADBaTXUZGL".into()],
+            )
+            .expect("applies");
+        assert_eq!(
+            r.host_key.as_deref(),
+            Some("AyEsg3CzX34Yn1PRQu8LsNYVHQiYb7u585ADBaTXUZGL")
+        );
+        assert_eq!(r.hostname.as_deref(), Some("10.0.0.1"));
+
+        // No overrides must behave exactly as `resolve`.
+        assert_eq!(
+            cfg.resolve_with("ex", &[]).expect("applies").user,
+            cfg.resolve("ex").user
+        );
+
+        // Malformed overrides are refused rather than ignored.
+        assert!(cfg.resolve_with("ex", &["nonsense".into()]).is_err());
+        assert!(cfg.resolve_with("ex", &["port=notanumber".into()]).is_err());
+    }
+
+    /// A destination naming no user must stay open for the config to fill in.
+    #[test]
+    fn parse_remote_leaves_an_unspecified_user_unset() {
+        use crate::client::parse_remote;
+
+        let bare = parse_remote("ex:/tmp/x").expect("parses");
+        assert_eq!(bare.user, None, "config User must still get its chance");
+        assert_eq!(bare.host, "ex");
+        assert_eq!(bare.path.as_deref(), Some("/tmp/x"));
+
+        let named = parse_remote("root@ex:/tmp/x").expect("parses");
+        assert_eq!(named.user.as_deref(), Some("root"));
+
+        // Defaulting to the local username here is what made `sqscp file
+        // ex:/tmp/x` authenticate as the wrong user while `sqssh ex` — which
+        // resolves separately — authenticated as root from the same config.
+        assert_ne!(
+            bare.user,
+            Some(whoami::username()),
+            "must not be pre-filled with the local user"
+        );
     }
 
     /// Version 0 is reserved by SIP-29 and must never be emitted, so it is

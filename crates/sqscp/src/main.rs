@@ -170,7 +170,7 @@ async fn upload(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let conn = client::connect(
         &remote.host,
-        Some(&remote.user),
+        remote.user.as_deref(),
         cli.port,
         cli.identity.as_deref(),
         cli.config_file.as_deref(),
@@ -562,7 +562,7 @@ async fn download(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let conn = client::connect(
         &remote.host,
-        Some(&remote.user),
+        remote.user.as_deref(),
         cli.port,
         cli.identity.as_deref(),
         cli.config_file.as_deref(),

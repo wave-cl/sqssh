@@ -11,7 +11,13 @@ use crate::protocol::{self, AgentRequest, AgentResponse};
 
 /// Parsed remote destination.
 pub struct RemoteSpec {
-    pub user: String,
+    /// `None` when the destination named no user.
+    ///
+    /// Deliberately not defaulted to the local username here. Doing that made
+    /// `host:path` indistinguishable from `me@host:path` by the time config
+    /// resolution ran, so a `Host` block's `User` could never take effect —
+    /// `sqssh ex` connected as root and `sqscp file ex:/tmp/x` did not.
+    pub user: Option<String>,
     pub host: String,
     pub path: Option<String>,
 }
@@ -38,11 +44,7 @@ pub fn parse_remote(s: &str) -> Option<RemoteSpec> {
         (None, userhost.to_string())
     };
 
-    Some(RemoteSpec {
-        user: user.unwrap_or_else(whoami::username),
-        host,
-        path,
-    })
+    Some(RemoteSpec { user, host, path })
 }
 
 /// Established, authenticated connection to a remote sqsshd.

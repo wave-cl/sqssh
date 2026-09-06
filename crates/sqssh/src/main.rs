@@ -133,7 +133,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
         .map(PathBuf::from)
         .unwrap_or_else(|| sqssh_dir.join("config"));
     let config = ClientConfig::load(&config_path)?;
-    let resolved = config.resolve(&host);
+    let resolved = config.resolve_with(&host, &cli.options)?;
 
     let actual_host = resolved.hostname.as_deref().unwrap_or(&host);
     let port = cli.port.unwrap_or(resolved.port);
@@ -247,7 +247,7 @@ async fn reconnect_raw_shell(
         .map(PathBuf::from)
         .unwrap_or_else(|| sqssh_dir.join("config"));
     let config = ClientConfig::load(&config_path)?;
-    let resolved = config.resolve(&host);
+    let resolved = config.resolve_with(&host, &cli.options)?;
 
     let actual_host = resolved.hostname.as_deref().unwrap_or(&host);
     let port = cli.port.unwrap_or(resolved.port);
