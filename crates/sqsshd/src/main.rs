@@ -289,6 +289,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             None
         },
         disable_active_migration: !server_config.connection_migration,
+        max_connections: server_config.max_connections,
         ..Default::default()
     };
 

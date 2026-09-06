@@ -408,6 +408,11 @@ pub struct ServerConfig {
     pub print_last_log: bool,
     pub banner: Option<PathBuf>,
     pub max_auth_tries: usize,
+    /// Cap on concurrently-established connections (squic Config.max_connections).
+    /// None means unlimited. Each connection can hold up to its receive window,
+    /// so a public server should bound this; sqsshd is usually whitelist-mode,
+    /// where exposure is limited, but the knob is here for parity with sqexd.
+    pub max_connections: Option<u64>,
 }
 
 impl Default for ServerConfig {
@@ -428,6 +433,7 @@ impl Default for ServerConfig {
             print_last_log: true,
             banner: None,
             max_auth_tries: 6,
+            max_connections: None,
         }
     }
 }
@@ -496,6 +502,17 @@ impl ServerConfig {
                     config.max_sessions = value
                         .parse()
                         .map_err(|_| Error::Config(format!("invalid max sessions: {value}")))?;
+                }
+                "maxconnections" => {
+                    let n: u64 = value
+                        .parse()
+                        .map_err(|_| Error::Config(format!("invalid max connections: {value}")))?;
+                    if n == 0 {
+                        return Err(Error::Config(
+                            "MaxConnections must be positive (omit for unlimited)".into(),
+                        ));
+                    }
+                    config.max_connections = Some(n);
                 }
                 "controlsocket" => config.control_socket = PathBuf::from(value),
                 "connectionmigration" => {
@@ -662,6 +679,14 @@ mod tests {
     }
 
     /// A destination naming no user must stay open for the config to fill in.
+    #[test]
+    fn server_parses_max_connections_and_rejects_zero() {
+        let cfg = ServerConfig::parse("MaxConnections 128\n").unwrap();
+        assert_eq!(cfg.max_connections, Some(128));
+        assert_eq!(ServerConfig::parse("").unwrap().max_connections, None);
+        assert!(ServerConfig::parse("MaxConnections 0\n").is_err());
+    }
+
     #[test]
     fn parse_remote_leaves_an_unspecified_user_unset() {
         use crate::client::parse_remote;
