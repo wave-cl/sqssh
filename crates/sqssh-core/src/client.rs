@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use ed25519_dalek::{SigningKey, VerifyingKey};
 
-use crate::config::ClientConfig;
+use crate::config::{ClientConfig, ResolvedConfig};
 use crate::error::{Error, Result};
 use crate::keys;
 use crate::known_hosts::KnownHosts;
@@ -47,6 +47,33 @@ pub fn parse_remote(s: &str) -> Option<RemoteSpec> {
     Some(RemoteSpec { user, host, path })
 }
 
+/// Which server key to pin for this connection.
+///
+/// A `HostKey` — from the config or from `-o hostkey=`, which is the same
+/// thing by the time it arrives here — wins over `known_hosts`. That order is
+/// the whole point of being able to state a key on the command line: it is how
+/// you reach a host whose key you have been given but have not written down,
+/// and how you override one you have written down and now doubt.
+///
+/// Worth stating because getting it backwards is invisible in the ordinary
+/// case. If `known_hosts` won, a `-o hostkey=` naming the *wrong* key would
+/// still connect — silently, via the stored one — and the override would look
+/// like it worked. That asymmetry is the only way to tell the two apart from
+/// the outside, and it is what the test for this checks.
+pub fn server_key(
+    resolved: &ResolvedConfig,
+    known_hosts: &KnownHosts,
+    host: &str,
+) -> Result<VerifyingKey> {
+    match resolved.host_key {
+        Some(ref hk) => keys::decode_pubkey(hk.as_str()),
+        None => known_hosts
+            .lookup(host)
+            .copied()
+            .ok_or_else(|| Error::UnknownHost(host.to_string())),
+    }
+}
+
 /// Established, authenticated connection to a remote sqsshd.
 pub struct Connection {
     pub conn: quinn::Connection,
@@ -78,14 +105,8 @@ pub async fn connect(
         .unwrap_or_else(whoami::username);
 
     // Resolve server public key
-    let server_pubkey = if let Some(ref hk) = resolved.host_key {
-        keys::decode_pubkey(hk)?
-    } else {
-        let known_hosts = KnownHosts::load(&sqssh_dir.join("known_hosts"))?;
-        *known_hosts
-            .lookup(actual_host)
-            .ok_or_else(|| Error::UnknownHost(actual_host.to_string()))?
-    };
+    let known_hosts = KnownHosts::load(&sqssh_dir.join("known_hosts"))?;
+    let server_pubkey = server_key(&resolved, &known_hosts, actual_host)?;
 
     // Resolve address
     let addr: SocketAddr = format!("{actual_host}:{port}")
@@ -244,5 +265,75 @@ fn try_agent_key() -> Option<(SigningKey, VerifyingKey)> {
             Some((sk, vk))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ed25519_dalek::SigningKey;
+
+    fn key(seed: u8) -> VerifyingKey {
+        SigningKey::from_bytes(&[seed; 32]).verifying_key()
+    }
+
+    /// Give it the **wrong** key and it must refuse to fall back.
+    ///
+    /// This is the only way to tell an honoured `-o hostkey=` from an ignored
+    /// one from the outside. With the right key both behave identically —
+    /// which is how the override looked fixed while it was still being
+    /// discarded, and known_hosts was quietly supplying the answer. So the
+    /// test states a key that is *valid but not this host's* and requires it
+    /// to be the one pinned.
+    #[test]
+    fn a_host_key_override_is_used_even_when_it_is_the_wrong_key() {
+        let stored = key(1); // what known_hosts holds for "ex"
+        let other = key(2); // a real key, belonging to some other host
+
+        let mut known = KnownHosts::default();
+        known.add("ex", stored, "stored");
+
+        let cfg = ClientConfig::parse("").expect("empty config parses");
+
+        // No override: known_hosts answers.
+        let plain = cfg.resolve("ex");
+        assert_eq!(
+            server_key(&plain, &known, "ex").expect("known host"),
+            stored
+        );
+
+        // Override naming a different host's key: that key is pinned, and the
+        // stored one is not consulted. If this ever returns `stored`, an
+        // override is decorative and a wrong key connects anyway.
+        let overridden = cfg
+            .resolve_with("ex", &[format!("hostkey={}", keys::encode_pubkey(&other))])
+            .expect("override applies");
+        let pinned = server_key(&overridden, &known, "ex").expect("override pins");
+        assert_eq!(pinned, other, "the override must win over known_hosts");
+        assert_ne!(pinned, stored, "known_hosts must not have supplied it");
+
+        // A config `HostKey` behaves the same way — `-o` and the file reach
+        // this by the same route, which is why one test covers both.
+        let from_file = ClientConfig::parse(&format!(
+            "Host ex\n    HostKey {}\n",
+            keys::encode_pubkey(&other)
+        ))
+        .expect("parses");
+        assert_eq!(
+            server_key(&from_file.resolve("ex"), &known, "ex").expect("file pins"),
+            other
+        );
+
+        // Neither source: an unknown host, not a silent guess.
+        assert!(matches!(
+            server_key(&cfg.resolve("nowhere"), &known, "nowhere"),
+            Err(Error::UnknownHost(_))
+        ));
+
+        // A malformed override is refused rather than falling back.
+        let bad = cfg
+            .resolve_with("ex", &["hostkey=not-a-key".into()])
+            .expect("resolves");
+        assert!(server_key(&bad, &known, "ex").is_err());
     }
 }
