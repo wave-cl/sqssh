@@ -26,7 +26,7 @@ pub struct HostConfig {
     /// SIP-29: the sQUIC envelope version to emit.
     ///
     /// Unset means squic's own default, which is version 3 as of squic
-    /// v0.20.0 — the version carrying MAC0 (SIP-37). Set it *down*, to 2 or 1,
+    /// v0.20.0 — the version carrying MAC0 (SIP-6). Set it *down*, to 2 or 1,
     /// for a server too old to accept that: a server that does not recognise
     /// the version drops the Initial in silence, so the symptom of aiming too
     /// high is a handshake timeout with no diagnostic.
@@ -579,7 +579,7 @@ pub fn apply_client_envelope_version(cfg: &mut squic::Config, resolved: &Resolve
 ///
 /// Unset leaves squic's own default — every version it knows. Narrowing the set
 /// is a deployment's own decision, and it is the decision that finally makes
-/// the cookie stage silent, since MAC0 exists only on version 3 (SIP-37).
+/// the cookie stage silent, since MAC0 exists only on version 3 (SIP-6).
 pub fn apply_accepted_envelope_versions(cfg: &mut squic::Config, server: &ServerConfig) {
     if let Some(v) = &server.accepted_envelope_versions {
         cfg.accepted_envelope_versions = v.clone();

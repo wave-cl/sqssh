@@ -106,7 +106,7 @@ fn test_server_config_parse() {
 /// the oldest one ever defined becomes a permanent floor. Unset leaves squic's
 /// own default — every version it knows — because retiring one is a
 /// deployment's own decision, and it is the decision that finally makes the
-/// cookie stage silent (SIP-37: MAC0 exists only on version 3).
+/// cookie stage silent (SIP-6: MAC0 exists only on version 3).
 #[test]
 fn accepted_envelope_versions_are_unset_by_default_and_can_be_narrowed() {
     use sqssh_core::config::ServerConfig;
