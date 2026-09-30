@@ -25,11 +25,13 @@ pub struct HostConfig {
     pub connection_migration: Option<bool>,
     /// SIP-29: the sQUIC envelope version to emit.
     ///
-    /// Unset means squic's own default, which is version 3 as of squic
-    /// v0.20.0 — the version carrying MAC0 (SIP-6). Set it *down*, to 2 or 1,
-    /// for a server too old to accept that: a server that does not recognise
-    /// the version drops the Initial in silence, so the symptom of aiming too
-    /// high is a handshake timeout with no diagnostic.
+    /// **There is nothing to choose today.** squic implements version 4 and
+    /// only version 4; versions 1 to 3 were removed rather than deprecated, so
+    /// leave this unset. A value squic cannot emit is refused at dial, naming
+    /// the version it does emit — which matters because a server that cannot
+    /// parse an envelope drops it without a word, so without that guard a
+    /// misconfiguration and an unreachable host look identical. The setting
+    /// survives for the next transition.
     ///
     /// Unset stays `None` rather than resolving to a number here, so squic's
     /// default is never silently pinned over. That mistake is how a client kept
@@ -577,9 +579,11 @@ pub fn apply_client_envelope_version(cfg: &mut squic::Config, resolved: &Resolve
 /// Apply a server config's accepted SIP-29 envelope versions to a squic server
 /// config, for the same reason and with the same caveat as the client side.
 ///
-/// Unset leaves squic's own default — every version it knows. Narrowing the set
-/// is a deployment's own decision, and it is the decision that finally makes
-/// the cookie stage silent, since MAC0 exists only on version 3 (SIP-6).
+/// Unset leaves squic's own default, which is every version it knows — today
+/// version 4 alone, so there is no set to narrow. Narrowing stays a
+/// deployment's decision for the next transition; squic refuses a list naming
+/// a version it cannot parse at `listen`, rather than binding and then
+/// dropping every Initial in silence.
 pub fn apply_accepted_envelope_versions(cfg: &mut squic::Config, server: &ServerConfig) {
     if let Some(v) = &server.accepted_envelope_versions {
         cfg.accepted_envelope_versions = v.clone();

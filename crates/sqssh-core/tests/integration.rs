@@ -103,10 +103,14 @@ fn test_server_config_parse() {
 }
 
 /// SIP-29 requires that a server be able to refuse an old envelope version, or
-/// the oldest one ever defined becomes a permanent floor. Unset leaves squic's
-/// own default — every version it knows — because retiring one is a
-/// deployment's own decision, and it is the decision that finally makes the
-/// cookie stage silent (SIP-6: MAC0 exists only on version 3).
+/// the oldest one ever defined becomes a permanent floor.
+///
+/// This covers the **parser**, not the policy. squic implements version 4
+/// alone today, so the values below are ones it would refuse at `listen` —
+/// deliberately, because sqssh does not keep its own copy of which versions
+/// squic implements, and squic's guard names the implemented set in its error.
+/// What must hold here is that unset stays unset, so squic's own default
+/// applies, and that a set which would parse to nothing is rejected.
 #[test]
 fn accepted_envelope_versions_are_unset_by_default_and_can_be_narrowed() {
     use sqssh_core::config::ServerConfig;
